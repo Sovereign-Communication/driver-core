@@ -1,0 +1,17 @@
+# Force LF everywhere, on every platform.
+#
+# Not a style preference. The audit log is hash-chained: each record's
+# digest is computed over its canonical bytes, so a checkout that rewrites
+# LF to CRLF produces a chain that no longer matches its own hashes, and
+# `driver-core verify` reports a chain as altered on Windows while
+# verifying on Linux. Same evidence, two different verdicts, caused by the
+# checkout rather than by anything anyone did.
+* text=auto eol=lf
+
+# The audit log and any other evidence file are bytes, not text.
+*.jsonl -text
+*.baseline.json -text
+
+# Anything genuinely binary.
+*.whl binary
+*.png binary

@@ -1,0 +1,227 @@
+"""The REST surface, and the contract a host project integrates against.
+
+This is the seam promised in the design. A host application -- Harness, or
+anything else -- talks to driver-core over these endpoints and receives plain
+JSON it can serialise, branch on, and log. Nothing about the host's process,
+filesystem layout, or configuration has to match anything in here, which is
+what makes the integration a port rather than a merge.
+
+Three conventions carry the safety, and all three are visible in the response
+shape rather than in a side channel:
+
+* **Every response carries ``ok`` and, when false, a named ``reason`` from a
+  closed set.** A caller never has to parse prose to find out what happened,
+  and it never has to guess whether an absent field means "false" or "we
+  never found out".
+* **A refusal is HTTP 200 with ``ok: false``** for anything the driver
+  decided against doing. Only malformed requests and unknown routes are 4xx
+  and 5xx. A caller retrying on a 5xx must never be retrying a *decision*,
+  and conflating the two is how a refusal turns into a loop.
+* **Nothing is echoed that came off a screen.** Captures are summarised by
+  fingerprint, decisions by metadata. The response is safe to log.
+
+The server binds loopback only and requires a token, because an endpoint
+that can act on a machine should never be reachable by accident from another
+host. That is a floor, not a security claim -- see the threat notes in the
+README.
+"""
+import json
+import secrets
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from .config import load_settings
+from .driver import Driver
+from .errors import DriverError
+
+#: The closed set of stop reasons. Callers may branch on these; nothing else
+#: about a blocked step is a stable contract.
+STOP_REASONS = (
+    "no_capture", "insufficient_agreement", "extraction_disagreement",
+    "confidence_below_threshold", "state_not_stable", "decision_not_usable",
+    "no_action_recommended", "undeclared_action", "execution_refused",
+)
+
+#: Actions a caller may never reach through this API without first
+#: registering an executor for it. The server refuses to expose a route that
+#: would execute an action the driver has no handler for.
+def _ok(payload):
+    return {"ok": True, **payload}
+
+
+#: Marks an internal response envelope. A named marker rather than a
+#: "does it have a status key" test, because ``health`` legitimately
+#: reports ``status: "up"`` in its payload and would otherwise be mistaken
+#: for an already-wrapped response.
+_ENVELOPE = "_envelope"
+
+
+def _wrapped(status, payload):
+    return {_ENVELOPE: True, "status": status, "body": payload}
+
+
+def _refused(reason, detail="", **extra):
+    if reason not in STOP_REASONS:
+        raise DriverError(f"{reason!r} is not a declared stop reason")
+    return {"ok": False, "reason": reason, "detail": detail, **extra}
+
+
+class Service:
+    """The endpoint logic, free of HTTP.
+
+    Kept separate from the handler so the same behaviour can be exercised
+    directly by a test or an embedding process, and so the HTTP layer holds
+    no policy of its own.
+    """
+
+    def __init__(self, driver=None, *, token=None):
+        self.driver = driver or Driver(settings=load_settings())
+        self.token = token or secrets.token_urlsafe(24)
+
+    # -- routes ---------------------------------------------------------
+
+    def health(self, body=None):
+        return _ok({
+            "status": "up",
+            "keyed": self.driver.settings.keyed,
+            "settings": self.driver.settings.redacted(),
+            "vocabulary": self.driver.vocabulary.to_dict(),
+        })
+
+    def schemas(self, body=None):
+        from .states import SCREEN_SCHEMA, CLI_SCHEMA
+        return _ok({"schemas": [SCREEN_SCHEMA.to_dict(), CLI_SCHEMA.to_dict()]})
+
+    def vocabulary(self, body=None):
+        return _ok({"vocabulary": self.driver.vocabulary.to_dict()})
+
+    def step(self, body):
+        """Run one step. This is the integration's single call."""
+        target = body.get("target")
+        if not target:
+            return _wrapped(400, {"ok": False, "error": "target is required"})
+        schema = self._schema_for(body.get("schema"))
+        consent = self._consent_for(body.get("consent"))
+        try:
+            result = self.driver.step(
+                target, schema=schema, consent=consent,
+                prefer=tuple(body.get("prefer") or ()),
+                require_stable=bool(body.get("require_stable", True)))
+        except DriverError as exc:
+            return _wrapped(400, {"ok": False, "error": str(exc)})
+        # A decision the driver declined to act on is a successful API call
+        # reporting a refusal, not a transport error. See the module
+        # docstring: a caller retrying on 5xx must never be retrying a
+        # decision.
+        return _wrapped(200, result.to_dict())
+
+    def _schema_for(self, name):
+        from .states import CLI_SCHEMA, SCREEN_SCHEMA
+        if not name or name in ("screen", "gui", "dom"):
+            return SCREEN_SCHEMA
+        if name == "cli":
+            return CLI_SCHEMA
+        return None
+
+    def _consent_for(self, body):
+        from .executor import Consent
+        if not body:
+            return None
+        return Consent(granted=bool(body.get("granted", False)),
+                       action=body.get("action", "*"),
+                       params=body.get("params") or {},
+                       by=body.get("by", "api"))
+
+    def verify(self, body=None):
+        verdict = self.driver.audit.verify()
+        return _ok({"audit": verdict.to_dict(),
+                    "budget": self.driver.budget.snapshot()})
+
+    # -- dispatch -------------------------------------------------------
+
+    def handle(self, route, body):
+        """Every route returns ``{"status": int, "body": dict}``.
+
+        The envelope is uniform on purpose. When some routes return a bare
+        payload and others a wrapped one, the HTTP layer has to know which is
+        which, and the first route added that forgets the convention returns
+        a KeyError deep in a request instead of a clean 404.
+        """
+        routes = {
+            "health": self.health,
+            "schemas": self.schemas,
+            "vocabulary": self.vocabulary,
+            "step": self.step,
+            "verify": self.verify,
+        }
+        handler = routes.get(route)
+        if handler is None:
+            return _wrapped(404, {"ok": False,
+                                  "error": f"unknown route {route!r}"})
+        outcome = handler(body or {})
+        if outcome.get(_ENVELOPE):
+            return outcome
+        return _wrapped(200, outcome)
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "driver-core"
+
+    def log_message(self, fmt, *args):  # keep the console usable
+        pass
+
+    def _authorised(self):
+        supplied = (self.headers.get("Authorization") or "").removeprefix(
+            "Bearer ").strip()
+        return secrets.compare_digest(supplied, self.server.service.token)
+
+    def _respond(self, status, payload):
+        body = json.dumps(payload, sort_keys=True).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if not self._authorised():
+            self._respond(401, {"ok": False, "error": "unauthorized"})
+            return
+        route = self.path.lstrip("/").split("?")[0] or "health"
+        outcome = self.server.service.handle(route, {})
+        self._respond(outcome["status"], outcome.get("body", outcome))
+
+    def do_POST(self):
+        if not self._authorised():
+            self._respond(401, {"ok": False, "error": "unauthorized"})
+            return
+        route = self.path.lstrip("/").split("?")[0]
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if length else b"{}"
+            body = json.loads(raw or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            self._respond(400, {"ok": False, "error": "body is not JSON"})
+            return
+        if not isinstance(body, dict):
+            self._respond(400, {"ok": False, "error": "body must be an object"})
+            return
+        outcome = self.server.service.handle(route, body)
+        self._respond(outcome["status"], outcome.get("body", outcome))
+
+
+def serve(host=None, port=None, *, service=None, block=True):
+    """Bind loopback and serve. Returns ``(server, service)``."""
+    settings = service.driver.settings if service else load_settings()
+    host = host or settings.host
+    port = port or settings.port
+    service = service or Service(Driver(settings=settings))
+    httpd = ThreadingHTTPServer((host, port), Handler)
+    httpd.service = service
+    if block:
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            httpd.server_close()
+    return httpd, service

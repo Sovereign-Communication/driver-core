@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Runtime state. The audit log is evidence about a machine, not source:
+# it must never be committed, and a stray one in the tree is a leak.
+*.jsonl
+audit.jsonl
+*.baseline.json
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

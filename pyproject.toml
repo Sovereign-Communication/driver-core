@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "driver-core"
+version = "1.0.0"
+description = "Verified extraction -> Jev decision -> deterministic action, for driving a local machine safely."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["agents", "system-one", "jev", "extraction", "consensus", "automation"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Quality Assurance",
+]
+
+# Deliberately zero. Every module in this package is stdlib-only, and that
+# is a design constraint rather than an accident: the integration target is
+# a host project that may have its own opinion about dependencies, and a
+# driver that acts on a machine is a poor place to introduce a supply chain.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["ruff>=0.5"]
+
+[project.scripts]
+driver-core = "driver_core.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Sovereign-Communication/driver-core"
+
+[tool.setuptools]
+packages = ["driver_core"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP"]

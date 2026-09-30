@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# The package is stdlib-only by design, so the matrix exists to catch the
+# things a zero-dependency package can still get wrong: a stdlib API that
+# only exists on newer versions, a path that behaves differently on another
+# OS, and a wheel that installs but does not import.
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.9", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Compile
+        run: python -m compileall -q driver_core
+      - name: Lint
+        run: ruff check driver_core tests
+      - name: Test
+        run: python -W error::ResourceWarning -m unittest discover -s tests -t . -v
+
+  wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+      - name: Wheel smoke (installed, not the source tree)
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install dist/*.whl
+          cd /tmp
+          DRIVER_AUDIT_PATH=/tmp/smoke-audit.jsonl /tmp/smoke/bin/driver-core health
+          /tmp/smoke/bin/driver-core verify

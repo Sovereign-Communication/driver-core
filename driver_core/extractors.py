@@ -1,0 +1,257 @@
+"""The extraction tier: N independent extractors over one capture.
+
+Independence is the only thing this module is for. The consensus tally can
+only say "two or more independent observers saw the same thing" if the
+observers really are independent, so the rules below are structural rather
+than advisory:
+
+* **An extractor never sees another's answer.** Each is handed the same
+  capture and the same schema and nothing else. There is no shared
+  conversation, no seed answer, no "the previous extractor said" hint. A
+  second model told what the first one said is a rubber stamp, not a second
+  observation.
+* **Failures are isolated.** One extractor dying must not affect the others;
+  a pool that stops at the first error is not a pool.
+* **Cost is recorded per slot**, including for slots that failed after the
+  provider billed them.
+
+Two kinds of extractor exist, and the distinction is the single biggest
+lever on cost and reliability:
+
+:class:`StructuredExtractor` is deterministic and free. It handles CLI
+output, DOM/accessibility trees and MCP results, where the "state" is
+already structured. Three of the four target classes need no vision at all,
+and this is the class that makes them work.
+
+:class:`ModelExtractor` spends money and can be wrong. It exists for native
+GUI pixels, where there is no structured source to read.
+"""
+import json
+
+from . import transport
+from .budget import UNAVAILABLE
+from .consensus import Vote
+from .errors import SchemaError
+from .schema import validate_state
+
+#: Instruction handed to a vision model. Deliberately instructs the model to
+#: answer only with the declared fields and to say it cannot tell, because a
+#: model that guesses produces a confident wrong value that -- absent the
+#: consensus tier -- would be indistinguishable from a true observation.
+EXTRACTION_INSTRUCTIONS = (
+    "You are reading a screen. Report ONLY the fields named below, using "
+    "exactly these field names. If a field is not visible or you are not "
+    "certain of it, omit it rather than guessing. Do not add commentary.\n"
+    "FIELDS:\n{fields}"
+)
+
+
+class Extraction:
+    """What one extractor observed."""
+
+    __slots__ = ("state", "reason", "cost", "usage_source", "model")
+
+    def __init__(self, state=None, reason="", cost=0.0,
+                 usage_source=UNAVAILABLE, model=None):
+        self.state = state
+        self.reason = reason
+        self.cost = float(cost or 0.0)
+        self.usage_source = usage_source
+        self.model = model
+
+    @property
+    def ok(self):
+        return self.state is not None
+
+    def __repr__(self):
+        return f"Extraction(ok={self.ok}, reason={self.reason!r})"
+
+
+class StructuredExtractor:
+    """Deterministic extraction from an already-structured capture.
+
+    No model, no network, no cost, no variance. Given the same capture it
+    always produces the same observation, which means a disagreement between
+    two structured extractors is a bug in the reader rather than a genuine
+    difference of opinion -- and is worth surfacing loudly.
+    """
+
+    deterministic = True
+
+    def __init__(self, slot, reader):
+        self.slot = slot
+        self._reader = reader
+
+    def extract(self, capture, schema):
+        try:
+            raw = self._reader(capture, schema)
+        except Exception as exc:
+            return Extraction(reason=f"reader failed: {exc}")
+        if not isinstance(raw, dict):
+            return Extraction(reason="reader did not return a mapping")
+        # Validate here rather than deferring: a structured reader that emits
+        # an undeclared key is misconfigured, and letting that through would
+        # turn a wiring mistake into a consensus disagreement.
+        try:
+            state = validate_state(raw, schema)
+        except SchemaError as exc:
+            return Extraction(reason=str(exc))
+        return Extraction(state=state, usage_source="actual", cost=0.0)
+
+
+class ModelExtractor:
+    """Vision extraction: one model, one opinion, charged honestly.
+
+    Runs in its own try/except so a provider that hangs, rate-limits, or
+    returns a refusal becomes one failed slot rather than a failed round.
+    """
+
+    deterministic = False
+
+    def __init__(self, slot, model, *, endpoint, api_key, transport_module=None,
+                 timeout=90):
+        self.slot = slot
+        self.model = model
+        self.endpoint = endpoint
+        self.api_key = api_key
+        self._transport = transport_module or transport
+        self.timeout = timeout
+
+    def extract(self, capture, schema):
+        if not self.api_key:
+            return Extraction(reason="no key for this extractor")
+        fields = "\n".join(
+            f"- {f.name} ({f.type}"
+            + (f"/{f.presence}" if f.presence != "required" else "")
+            + f"): {f.description}" for f in schema.fields)
+        questions = {
+            "observation": transport.choice(
+                EXTRACTION_INSTRUCTIONS.format(fields=fields),
+                {"observed": "The screen was read and the fields are "
+                             "reported in the structured reply.",
+                 "unreadable": "The screen could not be read; no fields are "
+                               "reported."}),
+        }
+        try:
+            response = self._transport.call_service(
+                self.endpoint, questions,
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                timeout=self.timeout,
+                body_extra={"state": _capture_state(capture),
+                            "model": self.model})
+        except Exception as exc:
+            return Extraction(reason=f"transport raised: {exc}")
+
+        usage = response.usage() or {}
+        input_tokens = int(usage.get("input_tokens") or 0)
+        # A failed call is still possibly a billed call. Reporting zero here
+        # is how a vision loop quietly runs up a bill nobody can account for.
+        cost = 0.0
+        usage_source = UNAVAILABLE
+        if usage and input_tokens:
+            cost = input_tokens * 0.0000021  # nominal input rate, per 1M
+            usage_source = "actual"
+        elif usage:
+            cost = 0.0
+            usage_source = "estimated"
+
+        if not response.ok:
+            return Extraction(reason=f"{response.outcome}: {response.detail}",
+                              cost=cost, usage_source=usage_source,
+                              model=self.model)
+        payload = response.payload or {}
+        state = _state_from_payload(payload, schema)
+        if state is None:
+            return Extraction(reason="model returned no parseable state",
+                              cost=cost, usage_source=usage_source,
+                              model=self.model)
+        return Extraction(state=state, cost=cost, usage_source=usage_source,
+                          model=self.model)
+
+
+def _state_from_payload(payload, schema):
+    """Read a state out of a model response, or ``None``.
+
+    A model that reports "unreadable" is believed. A model whose structured
+    reply does not validate is not repaired -- the slot reports malformed and
+    the tally excludes it, because a repaired extraction is an extraction
+    nobody observed.
+    """
+    if not isinstance(payload, dict):
+        return None
+    choice = (payload.get("answers") or {}).get("observation") or {}
+    if choice.get("choice") != "observed":
+        return None
+    fields = payload.get("state") or payload.get("fields")
+    if not isinstance(fields, dict):
+        return None
+    try:
+        return validate_state(fields, schema)
+    except SchemaError:
+        return None
+
+
+def _capture_state(capture):
+    """The payload a vision model is shown.
+
+    The capture is opaque to this module: a path, a base64 payload or a
+    handle, depending on the perception tier. Whatever it is, the two things
+    that must never happen are (a) logging it and (b) letting it reach the
+    audit log, both of which are enforced by the callers.
+    """
+    if isinstance(capture, dict):
+        return capture
+    return {"image_ref": str(capture)}
+
+
+def _json_from_text(text):
+    if not text:
+        return None
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("```", 2)[1] if text.count("```") >= 2 else text
+        if text.lstrip().lower().startswith("json"):
+            text = text.lstrip()[4:]
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+class ExtractorPool:
+    """Runs every extractor against one capture and collects votes.
+
+    Sequential rather than parallel on purpose for the first version: the
+    number of extractors is small, the cost is already the dominant cost, and
+    a serial pool produces a deterministic ordering of records for the audit
+    log, which is worth more here than the wall-clock saving.
+    """
+
+    def __init__(self, extractors):
+        self.extractors = list(extractors)
+
+    @property
+    def size(self):
+        return len(self.extractors)
+
+    def run(self, capture, schema):
+        """Return one Vote per extractor. Never raises for a slot failure."""
+        votes = []
+        for extractor in self.extractors:
+            slot = getattr(extractor, "slot", f"slot-{len(votes)}")
+            try:
+                result = extractor.extract(capture, schema)
+            except Exception as exc:  # isolation is the point
+                votes.append(Vote.error(slot, f"extractor raised: {exc}"))
+                continue
+            if result.ok:
+                votes.append(Vote.ok(slot, result.state, cost=result.cost,
+                                     usage_source=result.usage_source))
+            else:
+                # A model that answered but produced nothing usable is
+                # malformed, not merely unavailable: it occupied a slot and
+                # spent money, and the tally must reflect that.
+                votes.append(Vote.malformed(slot, result.reason or "no state",
+                                            cost=result.cost,
+                                            usage_source=result.usage_source))
+        return votes
