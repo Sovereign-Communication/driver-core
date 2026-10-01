@@ -311,7 +311,8 @@ class ExecutionSafetyTests(unittest.TestCase):
 
     def test_undeclared_parameter_is_refused(self):
         executor = Executor(vocabulary=DEFAULT_VOCABULARY,
-                            registry=build_read_only_registry())
+                            registry=build_read_only_registry(),
+                            audit=MemoryAuditLog())
         with self.assertRaises(Exception) as ctx:
             executor.execute("read_value", {"field": "x", "extra": 1})
         self.assertIn("undeclared parameter", str(ctx.exception))

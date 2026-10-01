@@ -277,6 +277,19 @@ def default_audit_path():
     return str(Path.home() / ".driver-core" / "audit.jsonl")
 
 
+def audit_path_for(settings):
+    """Where a run's chain goes: the declared path, or this project's own.
+
+    Stated here beside the ``audit_path`` setting it reads and
+    :func:`default_audit_path` it defers to, so a caller that names its own
+    log says so at the call site and this stays the only place the rule
+    lives. A ``Driver`` used to decide this for its caller behind a default
+    argument, which meant the two entry points that build one -- the CLI and
+    the service -- never had to say where their records were going.
+    """
+    return settings.audit_path or default_audit_path()
+
+
 def assert_no_foreign_reads(names):
     """Raise if any name read does not carry the driver-core prefix.
 

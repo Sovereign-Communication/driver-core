@@ -30,7 +30,8 @@ import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import __version__
-from .config import load_settings
+from .audit import AuditLog
+from .config import audit_path_for, load_settings
 from .driver import Driver
 from .errors import DriverError, PerceptionUnavailable
 from .perception import Target
@@ -76,7 +77,9 @@ class Service:
     """
 
     def __init__(self, driver=None, *, token=None):
-        self.driver = driver or Driver(settings=load_settings())
+        settings = load_settings()
+        self.driver = driver or Driver(
+            settings=settings, audit=AuditLog(audit_path_for(settings)))
         # Three ways to end up with a token, in descending precedence: an
         # explicit argument (a library caller holding its own), the operator's
         # DRIVER_TOKEN, and a generated one. The last is the default because a
@@ -348,7 +351,8 @@ def serve(host=None, port=None, *, service=None, block=True, announce=None):
     host = host or settings.host
     if port is None:
         port = settings.port
-    service = service or Service(Driver(settings=settings))
+    service = service or Service(Driver(
+        settings=settings, audit=AuditLog(audit_path_for(settings))))
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.service = service
     if announce is not None:

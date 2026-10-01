@@ -221,6 +221,7 @@ may change it, and the ones that used to be stated twice now are not.
 | Which port and host were bound | `serve`, from `server_address` | not from the arguments it was handed |
 | How a declared command becomes an argv | `wiring.parse_argv` | one rule, no escapes, nothing guessed |
 | What a record in the audit log is called | `audit.KIND_*` | producers import the name; no module writes the string |
+| Where a run's chain goes | `config.audit_path_for` | named by the caller, not decided behind a default argument |
 | Endpoint logic, free of HTTP | `Service` | `Handler` adds transport and nothing else |
 
 Seven of these were stated more than once, or crowded together, and each had
@@ -249,12 +250,28 @@ already cost something:
   first version scanned four hand-listed modules for a receiver named
   ``audit``, so a fifth module, or a local ``log = self.audit``, wrote a
   record kind as a string with the suite green — the same duplicated fact
-  one level down, inside the check meant to prevent it. The scan now covers
+  one level down, inside the check meant to prevent it.  The scan now covers
   every module in the package and keys on the shape of the call: a string
   literal may only be appended when nothing is passed by keyword, because a
   record always carries fields and the bare strings in ``jev_client`` never
   do. The producers are derived from the code rather than listed, and
   ``audit`` is the only module permitted to declare a name.
+
+  The log itself then became required. ``Driver`` and ``Executor`` both
+  defaulted ``audit=None``, which read as "auditing is optional" on the two
+  objects that actually run actions. It was not reachable — ``Driver``
+  substituted a real log — and that is exactly why it survived: unreachable
+  is not unrepresentable, and a default argument is representable. Both now
+  take a required ``audit``, and ``None`` is refused by name, so an action
+  that runs unrecorded cannot be spelled. There is no null log to reach for
+  either: ``MemoryAuditLog`` builds the same chain and holds the same
+  records, it just keeps them off the disk, which is what a test or a dry
+  run actually wants. ``JevClient`` and ``VisionExtractor`` already required
+  one, so the two outliers became the rule rather than the reverse.
+
+  Where a run's chain goes moved with it, out of ``Driver`` and into
+  ``config.audit_path_for``, because the CLI and the service now name their
+  own log at the call site instead of having one chosen behind them.
 
   ``states.FREE_CLASSES`` went in the same pass. It was byte-identical to
   ``observation.STRUCTURED_CLASSES``, had no readers anywhere, and existed

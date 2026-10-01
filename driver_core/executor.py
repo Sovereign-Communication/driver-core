@@ -31,7 +31,7 @@ happens to skip the interesting part.
 """
 from . import osal
 from .actions import IRREVERSIBLE, READ_ONLY
-from .audit import KIND_ACTION
+from .audit import KIND_ACTION, required
 from .errors import ConsentError, ExecutorError, VocabularyError
 
 #: Declared parameter normalisers, by name. An ``Action`` names one; this is
@@ -196,12 +196,15 @@ NO_CONSENT_NEEDED = Consent(True, "*", by="system")
 class Executor:
     """The model-free action tier."""
 
-    def __init__(self, *, vocabulary, registry, dry_run=False, audit=None,
+    def __init__(self, *, vocabulary, registry, audit, dry_run=False,
                  clock=None):
         self.vocabulary = vocabulary
         self.registry = registry
         self.dry_run = bool(dry_run)
-        self.audit = audit
+        #: Required, not optional. This class runs actions against the
+        #: machine, and an action that runs unrecorded is the failure the
+        #: whole log exists to make visible.
+        self.audit = required(audit, "An Executor")
         self._clock = clock
 
     def resolve(self, action_name, params):
