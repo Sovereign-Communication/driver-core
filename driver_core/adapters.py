@@ -36,6 +36,53 @@ from .observation import (
 )
 from .parsing import _last_reply, _tool_payload, read_document
 
+#: How many argv entries the launch diagnostic echoes before it abbreviates.
+#: The first entry is the one that failed; the rest exist so an operator can
+#: see where a declared command was split.
+_ARGV_ECHO = 6
+
+
+def _launch_failure(prefix, result, argv):
+    """Say what was actually attempted, not just that it was not found.
+
+    A bare ``not found: C:Python314python.exe`` is the least useful message
+    this package can produce: it names a path the operator never typed and
+    gives them nothing to compare it against. Echoing the resolved argv turns
+    it into a diagnosis -- when the first entry looks truncated, or when a
+    path has clearly been split across two entries, the cause is visible in
+    the same line as the failure.
+
+    Nothing here guesses what went wrong. It reports what was run and names
+    the two things that produce this failure, so the operator decides.
+    """
+    detail = f"{prefix}: {result.error}"
+    if result.reason != "not_found":
+        return detail
+    shown = list(argv[:_ARGV_ECHO])
+    if len(argv) > _ARGV_ECHO:
+        shown.append(f"... and {len(argv) - _ARGV_ECHO} more")
+    detail = f"{detail} -- attempted {shown!r}"
+    if _path_like(argv[0] if argv else ""):
+        detail += (
+            ". A declared command is split on whitespace with nothing "
+            "expanded or escaped, so quote any argument containing a space: "
+            '"C:\\path with spaces\\prog.exe"')
+    return detail
+
+
+def _path_like(token):
+    """Whether a token reads as a path rather than a bare command name.
+
+    Only decides whether *mentioning* the quoting fix is worth it. Missing a
+    case only costs a slightly plainer message; claiming a path where there
+    is none would send an operator after the wrong problem, so it asks for a
+    drive prefix or a separator rather than inferring from length or dots.
+    """
+    if not token:
+        return False
+    drive = len(token) >= 2 and token[0].isalpha() and token[1] == ":"
+    return drive or "/" in token or "\\" in token
+
 
 class ScreenSource:
     """The last resort: pixels.
@@ -129,7 +176,8 @@ class CliSource:
         if not result.ok and result.reason:
             # "not found" and "timed out" are failures to ask, not answers.
             return Capture(self.name, target, None,
-                           detail=f"command did not run: {result.error}")
+                           detail=_launch_failure("command did not run",
+                                                  result, argv))
         return Capture(
             self.name, target,
             {"exit_code": result.returncode,
@@ -207,7 +255,8 @@ class McpSource:
         result = osal.run(self.command, **kwargs)
         if not result.ok and result.reason:
             return Capture(self.name, target, None,
-                           detail=f"mcp server did not run: {result.error}")
+                           detail=_launch_failure("mcp server did not run",
+                                                  result, self.command))
         reply = _last_reply(result.stdout)
         if reply is None:
             return Capture(self.name, target, None,

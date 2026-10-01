@@ -15,35 +15,81 @@ Two rules the wiring holds to, both of which are the reason it exists:
   setting's presence, and the vision tier is never enabled by anything other
   than its own explicit switch.
 * **Commands are tokenised, never executed through a shell.** :func:`parse_argv`
-  uses :mod:`shlex` for splitting only -- no globbing, no variable expansion,
-  no redirection. A setting that reached a shell would be the first place in
-  this package where a configuration string could become code.
+  splits on whitespace and quotes and nothing else -- no globbing, no variable
+  expansion, no redirection. A setting that reached a shell would be the first
+  place in this package where a configuration string could become code.
 """
-import shlex
-
 from .config import ConfigError
 from .extractors import ExtractorPool, StructuredExtractor, build_vision_pool
 from .perception import (
     CLI, DOM, GUI, MCP, CliSource, DomSource, McpSource, ScreenSource,
 )
 
+#: What ends one token and begins the next, outside quotes.
+_SEPARATORS = " \t\r\n"
+
 
 def parse_argv(text):
     """Split a declared command into an argv list. Tokenisation only.
 
-    ``shlex`` here does what a shell's word-splitting does and nothing else
-    it does: no glob expansion, no ``$VAR`` interpolation, no ``|`` or ``&&``.
-    Those are the features that turn a configuration string into code, and
+    **One rule: a backslash is never an escape character. There are no
+    escapes.** Quotes group, and every character between them is literal.
+
+    This replaced ``shlex.split``, which is a POSIX shell word-splitter and so
+    reads ``\\`` as an escape everywhere outside quotes. On Windows that meant
+    ``C:\\Python314\\python.exe server.py`` resolved to
+    ``C:Python314python.exe`` -- the backslashes were eaten, the source
+    appeared configured, and the step then failed at run time with a ``not
+    found`` naming a path nobody had typed. That disables the ``cli`` and
+    ``mcp`` tiers on the platform this project tests on most.
+
+    Dropping escapes entirely is also what keeps the rule total. Keeping
+    ``\\"`` as the one exception would have reintroduced the identical bug for
+    a Windows path ending in a separator: ``"C:\\Users\\me\\"`` would have its
+    closing quote consumed and its last backslash lost. A rule with no
+    exceptions cannot be misapplied in a way nobody can predict, and a host
+    that needs a quote character inside an argument is told so rather than
+    having it silently mangled.
+
+    What this still does *not* do is what a shell does: no globbing, no
+    ``$VAR`` interpolation, no ``|``, no ``&&``, no redirection.
     :func:`driver_core.osal.run` takes an argv list precisely so that no
-    string ever reaches a shell.
+    configuration string can become code.
     """
     if not text or not text.strip():
         raise ConfigError("a declared command is empty")
-    try:
-        argv = shlex.split(text)
-    except ValueError as exc:
+
+    argv, current, started, quote = [], [], False, None
+    for ch in text:
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            else:
+                current.append(ch)
+            continue
+        if ch in "\"'":
+            quote = ch
+            started = True
+        elif ch in _SEPARATORS:
+            if started:
+                argv.append("".join(current))
+                current, started = [], False
+        else:
+            current.append(ch)
+            started = True
+
+    if quote is not None:
+        # Refused rather than guessed at. Closing the quote would be a guess,
+        # and a wrong guess here is a source that looks configured and then
+        # fails at run time -- which is the failure this function exists to
+        # prevent, reproduced one level up.
         raise ConfigError(
-            f"declared command {text!r} could not be tokenised: {exc}") from None
+            f"declared command {text!r} could not be tokenised: unterminated "
+            f"{quote} quote. Nothing is expanded or escaped here, so quote the "
+            f"whole argument if it contains a space: "
+            f'"C:\\path with spaces\\prog.exe"')
+    if started:
+        argv.append("".join(current))
     if not argv:
         raise ConfigError(f"declared command {text!r} has no executable")
     return argv

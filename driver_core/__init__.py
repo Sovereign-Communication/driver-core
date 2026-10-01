@@ -1,8 +1,25 @@
-"""driver-core: verified extraction -> Jev decision -> deterministic action.
+r"""driver-core: verified extraction -> Jev decision -> deterministic action.
 
 This module is the single owner of the version number. ``pyproject.toml`` reads
 it (``[tool.setuptools.dynamic]``) and ``GET /health`` reports it, so the built
 wheel, the running service and this docstring cannot drift apart.
+
+Version note: ``3.3.0`` makes an unquoted absolute Windows path work. The
+declared-command tokeniser was POSIX ``shlex``, which reads ``\`` as an escape
+outside quotes, so ``C:\Python314\python.exe server.py`` resolved to
+``C:Python314python.exe`` -- a path nobody typed, from a source that still
+reported itself configured, failing at run time with ``not found``. That left
+the ``cli`` and ``mcp`` tiers unusable with an absolute interpreter path on
+Windows.
+
+The rule is now total: whitespace separates, quotes group, and **a backslash is
+never an escape character. There are no escapes** -- including ``\"``, because
+keeping that one exception reproduces the same bug for a path ending in a
+separator (``"C:\Users\me\"``). One behaviour change worth stating plainly for
+anyone who was relying on it: a POSIX operator using ``\ `` to escape a space
+must now quote it. An unquoted argument containing a space is split, and the
+resulting ``not found`` names the argv it actually attempted, so the split is
+visible in the same line as the failure.
 
 Version note: ``3.2.0`` lets a host supply the token it will present, which is
 the missing half of the REST surface. The token check has been there since the
@@ -74,4 +91,4 @@ previously stood for "every mutating action" was removed from this package's
 vocabulary of grants. The wire contract did not change then either.
 """
 
-__version__ = "3.2.0"
+__version__ = "3.3.0"
