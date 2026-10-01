@@ -245,6 +245,17 @@ already cost something:
   with the exact parameters it was bound to, and adding a second record for
   the same fact would change what a run writes.
 
+  Keeping that from drifting again needed the guard itself to hold. The
+  first version scanned four hand-listed modules for a receiver named
+  ``audit``, so a fifth module, or a local ``log = self.audit``, wrote a
+  record kind as a string with the suite green — the same duplicated fact
+  one level down, inside the check meant to prevent it. The scan now covers
+  every module in the package and keys on the shape of the call: a string
+  literal may only be appended when nothing is passed by keyword, because a
+  record always carries fields and the bare strings in ``jev_client`` never
+  do. The producers are derived from the code rather than listed, and
+  ``audit`` is the only module permitted to declare a name.
+
   ``states.FREE_CLASSES`` went in the same pass. It was byte-identical to
   ``observation.STRUCTURED_CLASSES``, had no readers anywhere, and existed
   so the "three of four classes need no pixels" claim could be asserted —
