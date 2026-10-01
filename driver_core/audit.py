@@ -55,6 +55,28 @@ def _now():
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
+def required(log, owner):
+    """The chain an object that acts on the machine must write to.
+
+    ``None`` is not a chain, so it is refused rather than stored: an
+    executor holding no log runs an irreversible action and records nothing,
+    which is the one outcome this package exists to make impossible. There
+    is no null object to reach for instead -- :class:`MemoryAuditLog` is not
+    one. It builds the same chain and holds the same records, it just keeps
+    them off the disk, which is what a test or a dry run actually wants.
+
+    Passed explicitly by every caller rather than defaulted, so forgetting
+    the argument is a ``TypeError`` at the call rather than a silent gap in
+    the log. :mod:`tests.test_declarations` checks the signature itself.
+    """
+    if log is None:
+        raise TypeError(
+            f"{owner} acts on the machine, so it needs a chain to write to. "
+            f"Pass audit=AuditLog(path) to keep one on disk, or "
+            f"audit=MemoryAuditLog() to keep the records in memory only.")
+    return log
+
+
 def _canonical(payload):
     """Byte-stable serialisation.
 

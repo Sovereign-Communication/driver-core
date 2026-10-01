@@ -44,10 +44,11 @@ from . import policy
 from .actions import DEFAULT_VOCABULARY
 from .audit import (
     KIND_CAPTURE, KIND_ESCALATION, KIND_EXTRACTION, KIND_REFUSAL, AuditLog,
+    required,
 )
 from .budget import Budget
 from .consensus import tally
-from .config import Settings, default_audit_path, load_settings
+from .config import Settings, load_settings
 from .errors import PerceptionUnavailable, VocabularyError
 from .executor import Executor
 from .executor_registry import build_driver_registry
@@ -114,14 +115,17 @@ class Driver:
     of any of them.
     """
 
-    def __init__(self, *, settings=None, budget=None, audit=None,
+    def __init__(self, *, audit, settings=None, budget=None,
                  vocabulary=DEFAULT_VOCABULARY, pool=None, jev=None,
                  executor=None, sources=None, screen=None, pools=None):
         self.settings = settings or load_settings()
         self.budget = budget or Budget(self.settings.run_ceiling_usd,
                                        step_ceiling_usd=self.settings.step_ceiling_usd)
-        self.audit = audit or AuditLog(
-            self.settings.audit_path or default_audit_path())
+        #: Required, not optional, and not defaulted to a path. A driver
+        #: runs actions, so where its chain goes is a decision its caller
+        #: makes and can see -- ``config.audit_path_for`` is the rule, and
+        #: the CLI and the service both pass it.
+        self.audit = required(audit, "A Driver")
         self.vocabulary = vocabulary
 
         # Each collaborator has exactly one owner. ``None`` means "use what

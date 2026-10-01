@@ -14,15 +14,21 @@ made safely. The seam is cheap to lose and cheap to state, so it is stated
 here as an import graph and checked.
 """
 import ast
+import importlib
+import inspect
 import os
 import pathlib
 import unittest
 
+import driver_core
 from driver_core import osal
 from driver_core.actions import (
     DEFAULT_VOCABULARY, READ_ONLY, Vocabulary, check_batch,
 )
+from driver_core.audit import KIND_REFUSAL, MemoryAuditLog
+from driver_core.driver import Driver
 from driver_core.errors import SchemaError, VocabularyError
+from driver_core.executor import Executor
 from driver_core.perception import StructuredSource, fingerprint
 from driver_core.schema import Field, Schema, validate_state
 from driver_core.states import SCREEN_SCHEMA
@@ -281,6 +287,93 @@ class ModuleSeamTests(unittest.TestCase):
         scanned = dict(_package_modules())
         for name in ("adapters.py", "chain.py", "observation.py", "parsing.py"):
             self.assertIn(name, scanned)
+
+
+class AuditIsRequiredTests(unittest.TestCase):
+    """Nothing that acts on the machine can be built without a chain.
+
+    ``Driver`` and ``Executor`` both used to default ``audit=None``, which
+    read as "auditing is optional" on the two objects that actually run
+    actions. It was not reachable in production -- ``Driver`` substituted a
+    real log -- which is exactly why it survived: unreachable is not the
+    same as unrepresentable, and a default argument is representable.
+
+    So the argument is required, ``None`` is refused, and this checks the
+    signature itself rather than a list of the classes that have it, so a
+    sixth one is covered without anyone remembering to add it here.
+    """
+
+    def _constructors_taking_an_audit(self):
+        """Every class in the package whose constructor accepts ``audit``."""
+        found = []
+        root = pathlib.Path(driver_core.__file__).parent
+        for path in sorted(root.glob("*.py")):
+            module = importlib.import_module(
+                f"driver_core.{path.stem}" if path.stem != "__init__"
+                else "driver_core")
+            for _, cls in inspect.getmembers(module, inspect.isclass):
+                if cls.__module__ != module.__name__:
+                    continue
+                init = cls.__dict__.get("__init__")
+                if init is None:
+                    continue
+                if "audit" in inspect.signature(init).parameters:
+                    found.append(cls)
+        return found
+
+    def test_no_constructor_defaults_the_audit_log(self):
+        defaulted = [cls.__name__ for cls in self._constructors_taking_an_audit()
+                     if inspect.signature(cls.__dict__["__init__"])
+                     .parameters["audit"].default is not inspect.Parameter.empty]
+        self.assertEqual(
+            defaulted, [],
+            f"a default of {defaulted} puts an unrecorded action back within "
+            f"reach; the argument has to be required")
+
+    def test_the_four_that_take_one_all_do(self):
+        """Pins that the scan found the real collaborators and not an empty
+        set, which would pass the test above for the wrong reason."""
+        self.assertEqual(
+            sorted(cls.__name__ for cls in self._constructors_taking_an_audit()),
+            ["Driver", "Executor", "JevClient", "VisionExtractor"])
+
+    def test_an_executor_cannot_be_built_without_a_chain(self):
+        with self.assertRaises(TypeError):
+            Executor(vocabulary=DEFAULT_VOCABULARY, registry={})
+
+    def test_a_driver_cannot_be_built_without_a_chain(self):
+        with self.assertRaises(TypeError):
+            Driver()
+
+    def test_none_is_refused_by_name(self):
+        """Passing ``audit=None`` explicitly is the same mistake with more
+        steps, and it must not be a way through."""
+        for owner, call in (
+            ("An Executor", lambda: Executor(
+                vocabulary=DEFAULT_VOCABULARY, registry={}, audit=None)),
+            ("A Driver", lambda: Driver(audit=None)),
+        ):
+            with self.subTest(owner=owner):
+                with self.assertRaises(TypeError) as ctx:
+                    call()
+                message = str(ctx.exception)
+                self.assertIn(owner, message)
+                # The message has to name both ways out, or a caller
+                # reaching this learns only that something is wrong.
+                self.assertIn("AuditLog(path)", message)
+                self.assertIn("MemoryAuditLog()", message)
+
+    def test_there_is_no_null_log_to_sneak_past_it_with(self):
+        """The refusal is only honest because the alternative still records.
+
+        A caller that wants no *disk* is a real case; a caller that wants no
+        *record* is not, and ``MemoryAuditLog`` must not quietly have become
+        the second one.
+        """
+        log = MemoryAuditLog()
+        log.append(KIND_REFUSAL, step_id="s", reason="r", detail="")
+        self.assertEqual([r["kind"] for r in log.read_all()], ["refusal"])
+        self.assertTrue(log.verify().ok)
 
 
 if __name__ == "__main__":
