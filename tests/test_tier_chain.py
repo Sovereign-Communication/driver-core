@@ -23,7 +23,7 @@ from driver_core.driver import Driver
 from driver_core.errors import PerceptionUnavailable
 from driver_core.ev import FakeJev, action_answer
 from driver_core.extractors import (
-    ExtractorPool, ModelExtractor,
+    ExtractorPool, VisionExtractor,
 )
 from driver_core.perception import (
     CLI, DOM, GUI, MCP, SOURCE_ORDER, STRUCTURED_CLASSES, TARGET_CLASSES,
@@ -257,9 +257,12 @@ class PoolSelectionTests(unittest.TestCase):
         pool = self._pool(GUI, [])
         self.assertIsNone(pool.for_target(Target("app", DOM)))
 
-    def test_the_model_extractor_declares_it_serves_only_gui(self):
-        extractor = ModelExtractor("slot", "m", endpoint="http://x",
-                                   api_key="k")
+    def test_the_vision_extractor_declares_it_serves_only_gui(self):
+        from driver_core.audit import MemoryAuditLog
+        from driver_core.budget import Budget
+        extractor = VisionExtractor(
+            "slot", load_settings(env={"DRIVER_JEV_API_KEY": "k"}),
+            budget=Budget(1.0, step_ceiling_usd=1.0), audit=MemoryAuditLog())
         self.assertEqual(extractor.serves, (GUI,))
         self.assertFalse(extractor.deterministic)
 
