@@ -58,10 +58,75 @@ last-resort component rather than the core of the system.
 | **Unanswered ≠ agreeing** | three distinct outcomes: `agreed`, `disagreed`, `insufficient` |
 | **Spend is refused before dispatch** | reserve → dispatch once → settle once; a call whose usage is unreadable is charged at the full estimate, never zero |
 | **No model past the action tier** | executors are named, registered, and closed; an unregistered name is a refusal, not a skip |
-| **Irreversible actions need exact consent** | bound to the action *and* its parameters; never batched with anything else |
+| **Consent is one exact `(action, params)` pair** | no wildcard exists, for anything with consequences; see below |
+| **Writing is off until you say so** | mutating and irreversible executors are registered only under `DRIVER_ALLOW_WRITE` |
+| **Irreversible actions need exact consent, once** | bound to the action *and* its resolved parameters, and spent by the use it authorised |
 | **Responses never carry screen content** | captures are summarised by fingerprint; the agreed value is opt-in, not the default |
 | **Every step is auditable** | hash-chained log; `verify` re-hashes the chain and says so out loud |
 | **OS contact lives in one module** | an AST scan fails the build if anything else imports `subprocess` or probes `os.name`/`sys.platform` |
+
+## Consent, precisely
+
+A consent is a **capability for one exact `(action, params)` pair**. It is
+reusable — that is what makes "click Next five times" safe under a single
+confirmation — but it is not transferable, and **there is no wildcard**.
+
+| class | requirement |
+|---|---|
+| `read_only` | none; observation is not a consequence |
+| `mutating` | exact action, exact params |
+| `irreversible` | exact action, exact params, **once** |
+
+Three things follow from that, and each of them is a refusal rather than a
+convention:
+
+- **A blanket grant authorises nothing.** `{"granted": true, "action": "*"}`
+  is not "everything mutating"; it is nothing with consequences. Somebody who
+  typed *yes* without being shown a path has not agreed to delete that path,
+  and a rule that pretends otherwise teaches an operator that a green
+  checkbox means less than it appears to.
+- **Params are compared in the resolved form.** Consent for `~/notes` does not
+  match a proposal of `/home/x/notes`. The path is resolved *before* anything
+  is displayed, so what the operator is shown, what is compared and what runs
+  are the same string. Resolving during comparison would silently widen every
+  grant.
+- **An irreversible consent is spent by its use.** A standing grant cannot
+  mean "delete this path, whenever this driver next runs", because nobody saw
+  the path when they said yes on the first run. A second deletion needs a
+  second person.
+
+Registration and consent are two independent gates and both are required.
+Registration answers *whether the capability exists*; consent answers *whether
+this call was approved*. A build that cannot write cannot be talked into
+writing.
+
+## What driver-core will not do for you
+
+**It ships no input backend.** Moving a mouse or a keyboard needs platform
+APIs — `SendInput` on Windows, Accessibility on macOS, XTest on Linux — and
+each arrives as a dependency or as `ctypes` against a DLL whose ABI is not
+this package's to depend on. A driver that acts on a machine is the last
+place to add a supply chain to. So `osal.send_input` is a *declaration* with a
+pluggable backend, and the shipped state is unregistered:
+
+```python
+from driver_core import osal
+
+def my_backend(kind, *, value=None, target):
+    ...                        # your platform code, your permission checks
+    return True, "sent"
+
+osal.register_input_backend(osal.platform_name(), my_backend)
+```
+
+Until you do, `click`, `type_text`, `press_key`, `focus`, `scroll` and
+`submit_irreversible` **refuse by name** rather than appearing to succeed
+while doing nothing. `osal.disable_input_backend()` withdraws one again, which
+is how a host arranges to observe a machine without being able to drive it.
+
+The two filesystem actions need no backend — `write_file` backs up and then
+replaces atomically, and `delete_file` refuses a missing path, a symlink and a
+directory before it commits — so driver-core performs those itself.
 
 ## Install
 
@@ -78,6 +143,21 @@ driver-core --dry-run step "my-app"      # rehearse a step; no side effects
 driver-core verify                       # re-hash the audit chain
 driver-core serve --print-token          # loopback REST surface
 ```
+
+Consent on the command line names one action and its parameters, and echoes
+the resolved pair before acting — because a person has to be able to see what
+they are agreeing to:
+
+```bash
+DRIVER_ALLOW_WRITE=1 driver-core step "my-app" \
+    --grant delete_file --grant-path ./drafts/old.txt
+# [consent] {"action": "delete_file", "by": "cli", "granted": true,
+#            "params": {"path": "/home/you/drafts/old.txt"}}
+```
+
+There is no `--grant-write`. It used to exist and used to authorise every
+mutating action; under the current law it would authorise nothing at all, and
+a flag that quietly does nothing is worse than no flag.
 
 ```python
 from driver_core import Driver, Consent
@@ -108,6 +188,7 @@ in flight, and it must never read another project's keys or state.
 | `DRIVER_STEP_CEILING_USD` | `0.50` | per-step pre-flight ceiling |
 | `DRIVER_RUN_CEILING_USD` | `5.00` | per-run ceiling |
 | `DRIVER_DRY_RUN` | `false` | rehearse without side effects |
+| `DRIVER_ALLOW_WRITE` | `false` | register the executors that have side effects |
 | `DRIVER_AUDIT_PATH` | OS state dir | the hash-chained log |
 
 ## Integrating into a host project
@@ -132,6 +213,18 @@ Three conventions a host can rely on:
   4xx. A caller retrying on 5xx must never be retrying a *decision*.
 - No response echoes what was on a screen.
 
+A `consent` object in a `POST /step` body is bound to exactly one action and
+one exact parameter set:
+
+```json
+{"target": "my-app", "consent": {"granted": true, "action": "write_file",
+                                 "params": {"path": "/abs/report.md",
+                                            "content": "..."}}}
+```
+
+`action: "*"` is accepted and authorises nothing with consequences. Send the
+action and the resolved parameters you mean.
+
 `tools/interference_check.py` in this repository is a worked example of the
 four-part check used to confirm this package has not disturbed a neighbouring
 repository while it is being built.
@@ -145,13 +238,14 @@ pointing this at a real machine:
 
 - start with `--dry-run` and read what it *would* do;
 - run with a read-only vocabulary until you trust the extraction;
+- leave `DRIVER_ALLOW_WRITE` off until you trust the consent model;
 - keep the step ceiling low until you trust the cost;
 - treat an irreversible action as requiring you, in the loop, every time.
 
 ## Development
 
 ```bash
-python -m unittest discover -s tests -t .    # 124 hermetic tests
+python -m unittest discover -s tests -t .    # 182 hermetic tests
 ruff check driver_core tests
 ```
 

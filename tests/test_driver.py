@@ -11,6 +11,7 @@ them by injection.
 import unittest
 
 from driver_core.actions import DEFAULT_VOCABULARY
+from driver_core import osal
 from driver_core.audit import MemoryAuditLog
 from driver_core.budget import Budget
 from driver_core.config import load_settings
@@ -18,7 +19,9 @@ from driver_core.driver import Driver, StepResult
 from driver_core.errors import ConsentError
 from driver_core.ev import FakeJev, action_answer
 from driver_core.executor import Consent, Executor
-from driver_core.executor_registry import build_read_only_registry
+from driver_core.executor_registry import (
+    build_driver_registry, build_read_only_registry,
+)
 from driver_core.extractors import (
     ExtractorPool, StructuredExtractor,
 )
@@ -64,10 +67,11 @@ def _agreed_pool(payload=None, slots=2):
     ])
 
 
-def _driver(**kwargs):
+def _driver(*, allow_write=False, **kwargs):
     settings = load_settings(env={}, quorum=2, min_agreement=1.0,
                             confidence_threshold=0.7, run_ceiling_usd=1.0,
-                            step_ceiling_usd=1.0, dry_run=True)
+                            step_ceiling_usd=1.0, dry_run=True,
+                            allow_write=allow_write)
     kwargs.setdefault("settings", settings)
     kwargs.setdefault("budget", Budget(1.0, step_ceiling_usd=1.0))
     kwargs.setdefault("audit", MemoryAuditLog())
@@ -288,8 +292,22 @@ class ExecutionSafetyTests(unittest.TestCase):
                             audit=MemoryAuditLog())
         with self.assertRaises(Exception) as ctx:
             executor.execute("click", {"target": "OK"},
-                             consent=Consent(True, "*"))
+                             consent=Consent(True, "click", {"target": "OK"}))
         self.assertIn("not registered", str(ctx.exception))
+
+    def test_the_refusal_says_whether_it_was_policy_or_wiring(self):
+        """An operator reading "not registered" must be able to tell whether
+        the build is incapable or the wiring is broken."""
+        from driver_core import osal
+        registry = build_driver_registry(allow_write=False)
+        executor = Executor(vocabulary=DEFAULT_VOCABULARY, registry=registry,
+                            audit=MemoryAuditLog())
+        path = osal.resolve_path("/tmp/x")
+        with self.assertRaises(Exception) as ctx:
+            executor.execute("delete_file", {"path": "/tmp/x"},
+                             consent=Consent(True, "delete_file",
+                                             {"path": path}))
+        self.assertIn("DRIVER_ALLOW_WRITE", str(ctx.exception))
 
     def test_undeclared_parameter_is_refused(self):
         executor = Executor(vocabulary=DEFAULT_VOCABULARY,
@@ -305,10 +323,98 @@ class ExecutionSafetyTests(unittest.TestCase):
         executor = Executor(vocabulary=DEFAULT_VOCABULARY, registry=registry,
                             dry_run=True, audit=MemoryAuditLog())
         result = executor.execute("click", {"target": "OK"},
-                                  consent=Consent(True, "*"))
+                                  consent=Consent(True, "click", {"target": "OK"}))
         self.assertTrue(result.ok)
         self.assertTrue(result.dry_run)
         self.assertEqual(performed, [])
+
+
+class ParameterProvenanceTests(unittest.TestCase):
+    """Parameters come from the caller, never from the decision tier.
+
+    A closed vocabulary bounds what the model may *name*. It does nothing
+    about what it may *invent*: a model asked to produce a path or a string
+    to type will produce a plausible one, and the whole design rests on that
+    never happening. So the parameters have no route from the decision tier
+    into the executor, and these tests check the route is absent rather than
+    trusting the docstring that says it is.
+    """
+
+    def _step(self, action, params=None, consent=None):
+        jev = FakeJev(action_answer(action, confidence=0.99))
+        return _driver(allow_write=True, pool=_agreed_pool(),
+                       sources=[_source()],
+                       jev=jev).step("target", params=params,
+                                     consent=consent)
+
+    def test_caller_parameters_reach_the_executor(self):
+        consent = Consent(True, "write_file",
+                          {"path": osal.resolve_path("/tmp/x"),
+                           "content": "hi"})
+        result = self._step("write_file",
+                            params={"path": "/tmp/x", "content": "hi"},
+                            consent=consent)
+        # Dry run in the test driver: the record is produced, nothing happens.
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(result.execution.params["content"], "hi")
+
+    def test_the_consent_must_match_the_parameters_actually_run(self):
+        """Consent and parameters are checked against each other.
+
+        Two spellings of the same pair, compared rather than assumed equal,
+        because a caller that supplies both should be told when they
+        disagree -- not have one silently win.
+        """
+        result = self._step("write_file",
+                            params={"path": osal.resolve_path("/tmp/x"),
+                                    "content": "hi"},
+                            consent=Consent(True, "write_file",
+                                            {"path": osal.resolve_path("/tmp/x"),
+                                             "content": "different"}))
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "execution_refused")
+
+    def test_a_parametrised_action_with_no_parameters_refuses(self):
+        """Rather than executing with defaults, which would be inventing
+        the arguments this design forbids anyone from inventing."""
+        result = self._step("write_file")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "execution_refused")
+        self.assertIn("missing required parameter", result.detail)
+
+    def test_an_action_taking_no_parameters_refuses_being_given_some(self):
+        """A parameter nobody declared is something outside this contract
+        trying to influence execution; discarding it quietly would hide
+        that."""
+        result = self._step("observe", params={"sneaky": 1})
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "execution_refused")
+        self.assertIn("takes no parameters", result.detail)
+
+    def test_the_decision_envelope_carries_no_parameters_to_execute(self):
+        """There is no field on the envelope for them to arrive in."""
+        from driver_core.jev_client import Decision, NATIVE
+        jev = FakeJev(Decision(NATIVE, recommended_action="write_file",
+                               confidence=0.99, native=True,
+                               guards={"state_is_stable": 1.0,
+                                       "a_blocking_choice_is_required": 0.1}))
+        result = _driver(pool=_agreed_pool(), sources=[_source()],
+                         jev=jev).step("target")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "execution_refused")
+
+    def test_a_write_is_impossible_while_writes_are_switched_off(self):
+        """The default build cannot write, and says which switch to turn."""
+        result = _driver(pool=_agreed_pool(), sources=[_source()],
+                         jev=FakeJev(action_answer("write_file",
+                                                   confidence=0.99))).step(
+            "target",
+            params={"path": osal.resolve_path("/tmp/x"), "content": "hi"},
+            consent=Consent(True, "write_file",
+                            {"path": osal.resolve_path("/tmp/x"),
+                             "content": "hi"}))
+        self.assertFalse(result.ok)
+        self.assertIn("DRIVER_ALLOW_WRITE", result.detail)
 
 
 class NonInterferenceTests(unittest.TestCase):

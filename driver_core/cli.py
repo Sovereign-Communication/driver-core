@@ -8,14 +8,24 @@ Every subcommand that can spend money or touch a machine reports what it did
 and refuses honestly when it could not. ``--json`` is available on all of
 them so a script can branch on ``ok`` and ``reason`` rather than parsing
 prose, and the exit code reflects whether the step actually executed.
+
+One consequence of the consent law is visible here. There is no blanket
+``--grant-write``: a consent is a capability for one exact ``(action, params)``
+pair, so ``step`` takes ``--grant ACTION`` plus the parameters that pair is
+bound to, and **echoes the resolved form it is about to use** before acting.
+That echo is not decoration. It is the only way a person can consent to what
+will actually run rather than to what they typed -- ``--grant delete_file
+--grant-path '~/notes'`` is shown as the absolute path, because that is the
+path that would be deleted.
 """
 import argparse
 import json
 import sys
 
+from .actions import DEFAULT_VOCABULARY
 from .config import load_settings
 from .driver import Driver
-from .executor import Consent
+from .executor import Consent, normalise_params
 from .server import Service, serve
 from .states import SCREEN_SCHEMA
 
@@ -37,6 +47,8 @@ def cmd_health(args, driver):
         print(f"driver-core: ok (keyed={settings.keyed})")
         print(f"  vocabulary : {driver.vocabulary.identity()} "
               f"({len(driver.vocabulary)} actions)")
+        print(f"  writes     : {'allowed' if settings.allow_write else 'off'} "
+              f"(DRIVER_ALLOW_WRITE)")
         print(f"  budget     : ${driver.budget.remaining:.6f} remaining of "
               f"${driver.budget.ceiling:.6f}")
         print(f"  audit      : {driver.audit.count} records")
@@ -66,16 +78,50 @@ def cmd_schema(args, driver):
     return EXIT_OK
 
 
+def _grant_for(args):
+    """The exact ``(action, params)`` pair asked for, or ``None``.
+
+    Raises on a bad grant. The parameters are validated and normalised
+    through the *same* path the executor uses, so what the operator is shown
+    is byte-identical to what will be compared and what will run. Validating
+    here also means a mistyped grant fails before a step starts, rather than
+    after a capture and a decision have already been paid for.
+
+    One declaration, two uses: the same pair becomes the consent *and* the
+    action's parameters. There is nowhere to put a second, slightly different
+    set of parameters, which is the point -- a CLI that could consent for one
+    thing and execute another would be asking to be trusted twice.
+    """
+    if not args.grant:
+        return None
+    action = DEFAULT_VOCABULARY.resolve(args.grant)
+    if args.grant_params:
+        params = json.loads(args.grant_params)
+        if not isinstance(params, dict):
+            raise ValueError("--grant-params must be a JSON object")
+    elif args.grant_path:
+        params = {"path": args.grant_path}
+    else:
+        params = {}
+    resolved = normalise_params(action, action.check_params(params))
+    return action.name, resolved
+
+
 def cmd_step(args, driver):
+    granted = _grant_for(args)
     consent = None
-    if args.grant_write:
-        consent = Consent(True, "*", by="cli")
-    elif args.grant:
-        consent = Consent(True, args.grant, params={"path": args.grant_path},
-                          by="cli")
+    action_params = {}
+    if granted is not None:
+        name, action_params = granted
+        consent = Consent(True, name, params=action_params, by="cli")
+        # stderr, not stdout: on a --json run stdout must stay one clean
+        # document that a script can parse without stripping a preamble.
+        print(f"[consent] {json.dumps(consent.to_dict(), sort_keys=True)}",
+              file=sys.stderr)
     result = driver.step(args.target, schema=SCREEN_SCHEMA, consent=consent,
                          prefer=tuple(args.prefer or ()),
-                         require_stable=not args.allow_unstable)
+                         require_stable=not args.allow_unstable,
+                         params=action_params)
     payload = result.to_dict()
     if not args.json:
         if payload["ok"]:
@@ -141,11 +187,21 @@ def build_parser():
     step.add_argument("target", help="what to observe")
     step.add_argument("--prefer", action="append",
                       help="prefer a structured source (cli, mcp, dom)")
-    step.add_argument("--grant", help="consent for one named action")
-    step.add_argument("--grant-path", default="",
-                      help="the path an --grant was given for")
-    step.add_argument("--grant-write", action="store_true",
-                      help="consent for all mutating actions")
+    step.add_argument(
+        "--grant",
+        help="consent for exactly this action name; there is no wildcard, "
+             "because a grant nobody was shown the parameters for is not a "
+             "grant. Must be one of: "
+             + ", ".join(DEFAULT_VOCABULARY.names()))
+    granted = step.add_mutually_exclusive_group()
+    granted.add_argument(
+        "--grant-path", default="",
+        help="bind a --grant to this path; shorthand for --grant-params "
+             "'{\"path\": \"...\"}'")
+    granted.add_argument(
+        "--grant-params", default="",
+        help="bind a --grant to this exact JSON parameter object; required "
+             "for any action whose declared params are not just 'path'")
     step.add_argument("--allow-unstable", action="store_true",
                       help="do not require the stability guard")
 

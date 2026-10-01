@@ -130,15 +130,20 @@ class CliTests(unittest.TestCase):
         import contextlib
         import io
         from driver_core import cli
-        buffer = io.StringIO()
-        with contextlib.redirect_stdout(buffer):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = cli.main(argv)
-        return code, buffer.getvalue()
+        return code, out.getvalue() + err.getvalue()
 
     def test_health_exits_zero(self):
         code, out = self._run(["health"])
         self.assertEqual(code, 0)
         self.assertIn("driver-core: ok", out)
+
+    def test_health_reports_whether_writes_are_allowed(self):
+        """The operator has to be able to see the gate before relying on it."""
+        _, out = self._run(["health"])
+        self.assertIn("writes     : off", out)
 
     def test_verify_exits_zero_on_an_intact_chain(self):
         code, out = self._run(["verify"])
@@ -160,6 +165,70 @@ class CliTests(unittest.TestCase):
         code, out = self._run(["--dry-run", "step", "anything"])
         self.assertIn(code, (0, 1))
         self.assertTrue("[refused]" in out or "[executed]" in out)
+
+    def test_there_is_no_blanket_grant_flag(self):
+        """``--grant-write`` used to exist and used to authorise every
+        mutating action. It is gone rather than silently neutered, because
+        a flag that quietly does nothing is worse than no flag."""
+        import contextlib
+        import io
+        from driver_core import cli
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                cli.main(["step", "t", "--grant-write"])
+
+    def test_a_grant_is_echoed_in_the_resolved_form_before_acting(self):
+        """The operator must be able to see what they are consenting to.
+
+        ``delete_file`` is used because its declared parameter set is exactly
+        ``{"path": ...}``, and the run is dry -- the echo is the subject.
+        """
+        import json
+        _, out = self._run(["--dry-run", "step", "t", "--grant", "delete_file",
+                            "--grant-path", "~"])
+        line = [ln for ln in out.splitlines() if ln.startswith("[consent]")]
+        self.assertEqual(len(line), 1)
+        granted = json.loads(line[0][len("[consent]"):])
+        self.assertEqual(granted["action"], "delete_file")
+        from driver_core import osal
+        self.assertEqual(granted["params"]["path"], osal.resolve_path("~"))
+
+    def test_a_grant_naming_an_undeclared_action_fails_before_the_step(self):
+        """A mistyped grant must fail before a capture and a decision have
+        already been paid for."""
+        from driver_core import cli
+        from driver_core.errors import VocabularyError
+        args = cli.build_parser().parse_args(
+            ["step", "t", "--grant", "delete_everything", "--grant-path", "x"])
+        with self.assertRaises(VocabularyError) as ctx:
+            cli._grant_for(args)
+        self.assertIn("not in the declared vocabulary", str(ctx.exception))
+
+    def test_a_grant_with_an_undeclared_param_is_refused(self):
+        from driver_core import cli
+        args = cli.build_parser().parse_args(
+            ["step", "t", "--grant", "delete_file", "--grant-params",
+             '{"path": "/tmp/x", "recursive": true}'])
+        with self.assertRaises(Exception) as ctx:
+            cli._grant_for(args)
+        self.assertIn("undeclared parameter", str(ctx.exception))
+
+    def test_a_grant_missing_its_params_is_refused(self):
+        from driver_core import cli
+        args = cli.build_parser().parse_args(
+            ["step", "t", "--grant", "write_file"])
+        with self.assertRaises(Exception) as ctx:
+            cli._grant_for(args)
+        self.assertIn("missing required parameter", str(ctx.exception))
+
+    def test_grant_path_and_grant_params_are_mutually_exclusive(self):
+        import contextlib
+        import io
+        from driver_core import cli
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                cli.main(["step", "t", "--grant", "write_file", "--grant-path",
+                          "a", "--grant-params", '{"content": "x"}'])
 
 
 if __name__ == "__main__":
