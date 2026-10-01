@@ -234,7 +234,7 @@ observation.
 | **Writing is off until you say so** | mutating and irreversible executors are registered only under `DRIVER_ALLOW_WRITE` |
 | **Irreversible actions need exact consent, once** | bound to the action *and* its resolved parameters, and spent by the use it authorised |
 | **Responses never carry screen content** | captures are summarised by fingerprint; the agreed value is opt-in, not the default |
-| **Every step is auditable** | hash-chained log; `verify` re-hashes the chain and says so out loud. The log is a required argument on everything that acts — an unrecorded action is a `TypeError`, not a default |
+| **Every step is auditable** | hash-chained log; `verify` re-hashes the chain and says so out loud. The log is a required argument on everything that acts, and an executor handed to a driver must write to that driver's own chain — an unrecorded or unlinked action is a `TypeError`, not a default |
 | **The log's vocabulary has one owner** | only `audit` declares a `KIND_*`; a whole-package AST scan fails the build if any module writes a record kind as a string, or a name is declared that nothing produces |
 | **Existing logs keep verifying** | `tests/test_audit_compat.py` re-hashes a recorded chain and compares a full run byte for byte |
 | **OS contact lives in one module** | an AST scan fails the build if anything else imports `subprocess` or probes `os.name`/`sys.platform` |
@@ -503,7 +503,7 @@ Before pointing this at a real machine:
 ## Development
 
 ```bash
-python -m unittest discover -s tests -t .    # 354 hermetic tests
+python -m unittest discover -s tests -t .    # 357 hermetic tests
 ruff check driver_core tests tools
 python tools/tier_order_run.py               # the tier chain, live
 python tools/live_action_run.py              # a declared action, live

@@ -18,6 +18,7 @@ import importlib
 import inspect
 import os
 import pathlib
+import re
 import unittest
 
 import driver_core
@@ -289,6 +290,19 @@ class ModuleSeamTests(unittest.TestCase):
             self.assertIn(name, scanned)
 
 
+class _Unchained:
+    """Something that acts and records nothing, the way a rogue executor does."""
+
+    audit = None
+
+
+class _WrongChain:
+    """Something that acts and records to a chain of its own."""
+
+    def __init__(self):
+        self.audit = MemoryAuditLog()
+
+
 class AuditIsRequiredTests(unittest.TestCase):
     """Nothing that acts on the machine can be built without a chain.
 
@@ -300,7 +314,10 @@ class AuditIsRequiredTests(unittest.TestCase):
 
     So the argument is required, ``None`` is refused, and this checks the
     signature itself rather than a list of the classes that have it, so a
-    sixth one is covered without anyone remembering to add it here.
+    sixth one is covered without anyone remembering to add it here. The
+    seam beside that check -- an executor handed to a driver rather than
+    built by one -- enforces the same rule, because that is where an
+    unrecorded action would actually arrive.
     """
 
     def _constructors_taking_an_audit(self):
@@ -374,6 +391,51 @@ class AuditIsRequiredTests(unittest.TestCase):
         log.append(KIND_REFUSAL, step_id="s", reason="r", detail="")
         self.assertEqual([r["kind"] for r in log.read_all()], ["refusal"])
         self.assertTrue(log.verify().ok)
+
+    def test_an_executor_brought_to_a_driver_must_share_its_chain(self):
+        """The seam, which is where an unrecorded action actually arrives.
+
+        ``Driver(executor=...)`` never went through the constructor check, so
+        a caller could hand over something recording to nothing, or to a
+        second chain whose records nothing links to the step that led to
+        them. Both are refused now, by name, with the way out named.
+        """
+        for label, executor in (
+            ("no chain at all", _Unchained()),
+            ("a different chain", _WrongChain()),
+            ("not an executor at all", object()),
+        ):
+            with self.subTest(executor=label):
+                with self.assertRaises(TypeError) as ctx:
+                    Driver(audit=MemoryAuditLog(), executor=executor)
+                self.assertIn("chain", str(ctx.exception))
+
+    def test_the_executor_a_driver_builds_shares_its_chain(self):
+        driver = Driver(audit=MemoryAuditLog())
+        self.assertIs(driver.executor.audit, driver.audit)
+
+    def test_one_function_owns_the_pairing_and_the_entry_points_use_it(self):
+        """``Driver`` alone cannot decide where the chain goes, and three
+        call sites each working it out is three copies of one rule.
+
+        Checked on the source rather than by calling the entry points,
+        because the failure is a duplicate someone adds later, not a wrong
+        answer today.
+        """
+        root = pathlib.Path(driver_core.__file__).parent
+        offenders = []
+        for path in sorted(root.glob("*.py")):
+            if path.name in ("driver.py", "audit.py"):
+                continue
+            text = path.read_text(encoding="utf-8")
+            if "Driver(" in text and "default_audit_path" in text:
+                offenders.append(path.name)
+            if re.search(r"Driver\([^)]*audit\s*=", text, re.S):
+                offenders.append(path.name)
+        self.assertEqual(
+            sorted(set(offenders)), [],
+            "a module builds a Driver and names its own chain; call "
+            "driver_from_settings instead")
 
 
 if __name__ == "__main__":

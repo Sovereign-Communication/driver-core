@@ -221,7 +221,7 @@ may change it, and the ones that used to be stated twice now are not.
 | Which port and host were bound | `serve`, from `server_address` | not from the arguments it was handed |
 | How a declared command becomes an argv | `wiring.parse_argv` | one rule, no escapes, nothing guessed |
 | What a record in the audit log is called | `audit.KIND_*` | producers import the name; no module writes the string |
-| Where a run's chain goes | `config.audit_path_for` | named by the caller, not decided behind a default argument |
+| A driver wired to the chain its settings declare | `driver.driver_from_settings` | the CLI and the service both call it; no module works it out for itself |
 | Endpoint logic, free of HTTP | `Service` | `Handler` adds transport and nothing else |
 
 Seven of these were stated more than once, or crowded together, and each had
@@ -270,8 +270,16 @@ already cost something:
   one, so the two outliers became the rule rather than the reverse.
 
   Where a run's chain goes moved with it, out of ``Driver`` and into
-  ``config.audit_path_for``, because the CLI and the service now name their
+  ``driver_from_settings``, because the CLI and the service now name their
   own log at the call site instead of having one chosen behind them.
+
+  Making the argument required turned out to be half the job. ``Driver``
+  also accepts an executor the caller built, and that path never reached the
+  constructor check — so a caller could hand over something recording to
+  nothing, or to a second chain whose records nothing links to the decision
+  that caused them. The seam enforces the same rule now, and the pairing
+  itself is one function rather than the same two-part expression written
+  three times over, which is the duplication this pass set out to remove.
 
   ``states.FREE_CLASSES`` went in the same pass. It was byte-identical to
   ``observation.STRUCTURED_CLASSES``, had no readers anywhere, and existed
