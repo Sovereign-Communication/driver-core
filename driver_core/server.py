@@ -105,7 +105,16 @@ class Service:
             result = self.driver.step(
                 target, schema=schema, consent=consent,
                 prefer=tuple(body.get("prefer") or ()),
-                require_stable=bool(body.get("require_stable", True)))
+                require_stable=bool(body.get("require_stable", True)),
+                # No new wire field: `params` already means "the parameter
+                # set" here, and consent is *defined* as bound to one exact
+                # (action, params) pair. The action's parameters are
+                # therefore the consent's parameters -- if the decision names
+                # a different action, or the declaration wants a different
+                # shape, `Consent.covers` refuses below. Adding a second
+                # field would have meant two spellings of the same pair that
+                # could drift apart.
+                params=consent.params if consent else {})
         except DriverError as exc:
             return _wrapped(400, {"ok": False, "error": str(exc)})
         # A decision the driver declined to act on is a successful API call
@@ -123,6 +132,14 @@ class Service:
         return None
 
     def _consent_for(self, body):
+        """The consent for this request, bound to one ``(action, params)``.
+
+        ``action`` defaults to ``"*"``, which under the consent law
+        authorises nothing with consequences. That default is deliberate and
+        should stay: a request that forgets to say what it is agreeing to
+        gets a refusal rather than a blanket grant it never explicitly asked
+        for.
+        """
         from .executor import Consent
         if not body:
             return None

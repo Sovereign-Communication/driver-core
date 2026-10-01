@@ -17,8 +17,17 @@ The order is the design, so it is worth stating plainly:
 4. **Gate** on the tally, before any state reaches a model.
 5. **Decide** with Jev, over the declared action vocabulary only.
 6. **Gate** on confidence and on the guards.
-7. **Execute** with a model-free executor, under consent.
+7. **Execute** with a model-free executor, under consent, with parameters
+   that came from the caller and not from the model.
 8. **Escalate** if any gate said no.
+
+The provenance of the *parameters* is as load-bearing as the provenance of
+the decision. The model is allowed to name an action out of a closed
+vocabulary; it is never allowed to supply a path, a URL or a string to type,
+because those are the things a model will confidently invent. They arrive
+from the caller -- the same place consent arrives from -- which is what lets
+an operator be shown the action *and* its parameters as a single pair and
+agree to exactly that.
 
 Each step's verdict is carried forward rather than recomputed, so a blocked
 extraction can never be followed by a decision that assumed it succeeded --
@@ -39,7 +48,7 @@ from .consensus import tally
 from .config import Settings, default_audit_path, load_settings
 from .errors import PerceptionUnavailable, VocabularyError
 from .executor import Executor
-from .executor_registry import build_read_only_registry
+from .executor_registry import build_driver_registry
 from .extractors import ExtractorPool
 from .jev_client import JevClient
 from .perception import select_capture
@@ -117,9 +126,13 @@ class Driver:
 
         self.jev = jev or JevClient(self.settings, budget=self.budget,
                                     audit=self.audit)
+        # Executors with a side effect are registered only when the operator
+        # has declared this machine may be written to. A caller that builds
+        # a Driver and passes no settings gets an observer.
         self.executor = executor or Executor(
             vocabulary=vocabulary,
-            registry=build_read_only_registry(),
+            registry=build_driver_registry(
+                allow_write=self.settings.allow_write),
             dry_run=self.settings.dry_run,
             audit=self.audit)
 
@@ -131,9 +144,18 @@ class Driver:
     # -- the pipeline ----------------------------------------------------
 
     def step(self, target, *, schema=None, consent=None, step_id=None,
-             prefer=(), require_stable=True):
+             prefer=(), require_stable=True, params=None):
         """Run one full step. Returns a :class:`StepResult`; never raises for
-        a blocked or degraded condition."""
+        a blocked or degraded condition.
+
+        ``params`` are the action's parameters, and they come from the
+        *caller* -- never from the decision tier. That provenance is the
+        point: a model naming an action is safe because the vocabulary is
+        closed, but a model supplying a path or a URL is the exact failure
+        this design exists to prevent. Keeping the parameters on the
+        caller's side of the line is also what lets them be shown to an
+        operator and consented to as a single ``(action, params)`` pair.
+        """
         step_id = step_id or uuid.uuid4().hex[:12]
         schema = schema or SCHEMAS_BY_TARGET.get("screen")
         if schema is None:
@@ -194,12 +216,29 @@ class Driver:
                               decision=decision, receipt=receipt,
                               cost=decision.cost)
         try:
-            execution = self.executor.execute(action.name, _params_for(action),
-                                              consent=consent, step_id=step_id)
+            execution = self.executor.execute(
+                action.name, _params_for(action, params),
+                consent=consent, step_id=step_id)
         except Exception as exc:
             return self._stop(step_id, "execution", "execution_refused", str(exc),
                               capture=capture, agreement=agreement,
                               decision=decision, receipt=receipt,
+                              cost=decision.cost)
+
+        # An executor that refused did not do the thing. The pipeline
+        # reaching the end is not the same as the action having happened,
+        # and a host that branches on ``ok`` must never be told a click
+        # occurred when no backend was registered to perform it.
+        #
+        # This is the same refusal, and the same already-declared reason, as
+        # an executor that raised -- just reported at the layer the caller
+        # actually reads. The execution record still travels with the result
+        # so the failure is inspectable rather than merely announced.
+        if not execution.ok:
+            return self._stop(step_id, "execution", "execution_refused",
+                              execution.detail, capture=capture,
+                              agreement=agreement, decision=decision,
+                              execution=execution, receipt=receipt,
                               cost=decision.cost)
 
         return StepResult(step_id, ok=True, stopped_at="executed",
@@ -221,15 +260,28 @@ class Driver:
                           reason=reason, detail=detail, **kwargs)
 
 
-def _params_for(action):
-    """Default parameters for a no-argument action.
+def _params_for(action, supplied):
+    """The parameters for one action, taken from the caller and never the model.
 
     The decision tier names an action; it does not supply arguments, because
     a model inventing a path or a URL is precisely the failure this design
-    exists to prevent. Actions that genuinely need arguments are executed by
-    a host-supplied executor that knows its own parameters.
+    exists to prevent. They arrive from the caller instead -- the same place
+    the consent arrives from, which is what makes them one thing to be shown
+    and agreed to rather than two that can drift apart.
+
+    An action that declares no parameters and is handed some refuses rather
+    than ignoring them. A parameter nobody declared is the same class of
+    problem as an undeclared action: something outside this contract is
+    trying to influence execution, and quietly discarding it would hide that.
     """
-    return {}
+    supplied = dict(supplied or {})
+    if not action.params:
+        if supplied:
+            raise VocabularyError(
+                f"action {action.name!r} takes no parameters, but "
+                f"{sorted(supplied)} were supplied")
+        return {}
+    return action.check_params(supplied)
 
 
 __all__ = ["Driver", "StepResult", "Settings", "load_settings", "Budget",

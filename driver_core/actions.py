@@ -45,10 +45,10 @@ class Action:
     """One declared action."""
 
     __slots__ = ("name", "action_class", "executor", "params", "description",
-                 "target")
+                 "target", "normalisers")
 
     def __init__(self, name, action_class, executor, params, description,
-                 target):
+                 target, normalisers=None):
         if not isinstance(name, str) or not name.strip():
             raise VocabularyError("action name must be a non-empty string")
         if action_class not in ACTION_CLASSES:
@@ -60,12 +60,21 @@ class Action:
             raise VocabularyError(f"action {name!r}: params must be a sequence")
         if not target.strip():
             raise VocabularyError(f"action {name!r}: target must be named")
+        undeclared = sorted(set(normalisers or {}) - set(params))
+        if undeclared:
+            raise VocabularyError(
+                f"action {name!r}: normaliser declared for undeclared "
+                f"parameter(s) {undeclared}")
         self.name = name
         self.action_class = action_class
         self.executor = executor
         self.params = tuple(params)
         self.description = description
         self.target = target
+        #: ``{param name: normaliser name}``. Names, not callables: the
+        #: executor tier resolves them to functions so that this module
+        #: stays a pure declaration and no platform logic leaks into it.
+        self.normalisers = dict(normalisers or {})
 
     @property
     def severity(self):
@@ -111,6 +120,7 @@ class Action:
             "params": list(self.params),
             "target": self.target,
             "description": self.description,
+            "normalisers": dict(self.normalisers),
         }
 
     def __repr__(self):
@@ -161,12 +171,13 @@ def _declare():
                "Scroll the focused scrollable region.", "any"),
         Action("write_file", MUTATING, "write_file", ("path", "content"),
                "Write a file through the backup-and-atomic-write policy.",
-               "filesystem"),
+               "filesystem", normalisers={"path": "resolve_path"}),
 
         # ---- irreversible ----------------------------------------------
         Action("delete_file", IRREVERSIBLE, "delete_file", ("path",),
                "Delete a file. Never batched; always a fresh human "
-               "confirmation.", "filesystem"),
+               "confirmation.", "filesystem",
+               normalisers={"path": "resolve_path"}),
         Action("submit_irreversible", IRREVERSIBLE, "submit_irreversible",
                ("target",), "Activate a control whose effect cannot be undone "
                "by this system. Never batched; always a fresh human "

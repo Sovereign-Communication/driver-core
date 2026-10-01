@@ -71,3 +71,14 @@ class PerceptionUnavailable(DriverError):
 
 class ExecutorError(DriverError):
     """A declared executor failed while performing an action."""
+
+
+class OsalError(DriverError):
+    """The operating-system layer could not or would not carry out a request.
+
+    Named separately from :class:`ExecutorError` because the two call for
+    different responses. An executor failure is "the action did not happen";
+    an osal failure is usually "the request was malformed, or this platform
+    cannot do it, or the host withheld permission" -- conditions the caller
+    can correct, as opposed to retrying.
+    """
