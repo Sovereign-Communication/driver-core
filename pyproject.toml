@@ -11,6 +11,12 @@ name = "driver-core"
 # remove the second copy instead, but it makes the build depend on importing
 # the package, and a test catches the drift that actually matters without
 # touching packaging.
+# 3.4.0: the audit log's record vocabulary has one owner. Producers import
+# audit.KIND_* rather than writing the string, KIND_CONSENT is deleted
+# because nothing produced it, and states.FREE_CLASSES is deleted as a
+# duplicate of observation.STRUCTURED_CLASSES. No record written changes --
+# tests/test_audit_compat.py pins both an existing chain and a full run
+# byte for byte.
 # 3.3.0: an unquoted absolute Windows path works. The declared-command
 # tokeniser was POSIX shlex, which read \ as an escape outside quotes, so
 # C:\Python314\python.exe resolved to C:Python314python.exe -- disabling the
@@ -32,7 +38,7 @@ name = "driver-core"
 # "what does this wire `schema` mean" is decided in one place instead of
 # separately in the CLI and the service. POST /step is unchanged: same fields,
 # same STOP_REASONS, same StepResult.to_dict().
-version = "3.3.0"
+version = "3.4.0"
 # 3.0.0: the perception tiers are reachable from the product. Sources are
 # registered from declared DRIVER_* settings (DRIVER_CLI_COMMAND,
 # DRIVER_MCP_COMMAND + DRIVER_MCP_TOOL, DRIVER_DOM_URL, DRIVER_SCREEN), and an

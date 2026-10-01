@@ -4,6 +4,21 @@ This module is the single owner of the version number. ``pyproject.toml`` reads
 it (``[tool.setuptools.dynamic]``) and ``GET /health`` reports it, so the built
 wheel, the running service and this docstring cannot drift apart.
 
+Version note: ``3.4.0`` gives the audit log's record vocabulary one owner.
+``audit.py`` declared seven ``KIND_*`` constants while four modules wrote
+their record kinds as bare strings, so a renamed constant would have left
+the log writing a kind it no longer declared -- in the one artifact where a
+record meaning exactly one thing is the entire point. The producers now
+import the names, ``KIND_CONSENT`` is gone because nothing produced it (a
+consent is recorded inside the ``action`` record it authorises), and
+``states.FREE_CLASSES`` is gone because it duplicated
+``observation.STRUCTURED_CLASSES`` with no readers.
+
+Nothing written changes. ``tests/test_audit_compat.py`` re-hashes a chain
+recorded before this change and compares a full run byte for byte, so the
+claim is checked rather than asserted; a record renamed, a field added or
+a record reordered each fail it. ``states.py`` loses a dead constant.
+
 Version note: ``3.3.0`` makes an unquoted absolute Windows path work. The
 declared-command tokeniser was POSIX ``shlex``, which reads ``\`` as an escape
 outside quotes, so ``C:\Python314\python.exe server.py`` resolved to
@@ -91,4 +106,4 @@ previously stood for "every mutating action" was removed from this package's
 vocabulary of grants. The wire contract did not change then either.
 """
 
-__version__ = "3.3.0"
+__version__ = "3.4.0"

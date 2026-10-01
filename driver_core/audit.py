@@ -29,11 +29,23 @@ from datetime import datetime, timezone
 #: a magic empty string, so the linkage rule is uniform at every position.
 GENESIS = "driver-core/audit/v1"
 
-# Record kinds, in the order a normal step produces them.
+#: The record kinds this log can hold, in the order one step produces them.
+#:
+#: These are the log's vocabulary, and the producers below import them rather
+#: than writing the strings. A declared kind nothing writes is a claim about
+#: the log that can rot with nothing to notice it; a kind written as a literal
+#: is the same claim with no owner at all. Both were true here at once: seven
+#: constants, five kinds in use, and every producer spelling its own string.
+#:
+#: ``KIND_CONSENT`` was declared and nothing produced it. It is gone rather
+#: than wired up, because a consent *is* recorded -- inside the ``action``
+#: record it authorises, with the exact parameters it was bound to -- and
+#: adding a second record for the same fact would change what a run writes.
+#: That is not a change this package makes casually: see
+#: ``tests/test_audit_compat.py``, which exists to catch exactly that.
 KIND_CAPTURE = "capture"
 KIND_EXTRACTION = "extraction"
 KIND_DECISION = "decision"
-KIND_CONSENT = "consent"
 KIND_ACTION = "action"
 KIND_ESCALATION = "escalation"
 KIND_REFUSAL = "refusal"

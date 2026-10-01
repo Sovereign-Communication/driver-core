@@ -146,12 +146,3 @@ def resolve_wire_target(name):
             f"unknown schema {name!r}; declared schemas are "
             f"{sorted(WIRE_TARGETS)}")
     return WIRE_TARGETS[key]
-
-#: Which target classes are answerable without a vision extractor.
-#:
-#: This is the load-bearing list for cost. A ``cli``, ``mcp`` or ``dom``
-#: target that resolved to a model extractor would mean paying to have a
-#: lossy rendering described when the state was already available exactly --
-#: and paying N times, because extraction is a pool. It is declared here so
-#: it can be asserted against, not just asserted in a comment.
-FREE_CLASSES = (CLI, MCP, DOM)

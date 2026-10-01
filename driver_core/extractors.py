@@ -32,6 +32,7 @@ whose spend reaches the run ceiling.
 import json
 
 from . import transport
+from .audit import KIND_EXTRACTION
 from .budget import UNAVAILABLE, estimate_call_cost
 from .config import JEV_INPUT_PRICE_PER_MILLION
 from .consensus import Vote
@@ -231,7 +232,7 @@ class VisionExtractor:
         """
         if self.audit is not None:
             self.audit.append(
-                "extraction",
+                KIND_EXTRACTION,
                 step_id=self.slot,
                 tier="vision",
                 ok=extraction.ok,
