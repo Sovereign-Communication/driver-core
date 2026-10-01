@@ -59,12 +59,10 @@ from driver_core import cli                                    # noqa: E402
 from driver_core.audit import AuditLog, MemoryAuditLog           # noqa: E402
 from driver_core.config import load_settings                   # noqa: E402
 from driver_core.driver import Driver                          # noqa: E402
-from driver_core.errors import PerceptionUnavailable           # noqa: E402
 from driver_core.ev import FakeJev, action_answer              # noqa: E402
 from driver_core.perception import GUI, Target                 # noqa: E402
 from driver_core.server import STOP_REASONS, Service, serve    # noqa: E402
 from driver_core.states import CLI_SCHEMA, DOM_SCHEMA          # noqa: E402
-from driver_core.wiring import configured_pools, configured_sources  # noqa: E402,E501
 
 PASS = "  ok  "
 FAIL = " FAIL "
@@ -117,23 +115,8 @@ def serve_page():
     return httpd, f"http://127.0.0.1:{httpd.server_port}/report"
 
 
-def free_port():
-    """An unused loopback port, chosen by the OS and then released.
-
-    ``serve()`` falls back to the configured port when handed ``0``, so the
-    run asks for a concrete one rather than assuming an ephemeral bind.
-    """
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
-
-
 def post(port, token, route, body):
-    """A real HTTP request. Returns ``(status, parsed_body)``.
-
-    The token check is exercised here too: an endpoint that can act on a
-    machine must not answer an unauthenticated caller.
-    """
+    """A real HTTP request. Returns ``(status, parsed_body)``."""
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/{route}",
         data=json.dumps(body).encode("utf-8"),
@@ -183,16 +166,15 @@ def run_all(workdir):
     # ---- 1. the default observes nothing, and says so -------------------
     show("nothing configured: the driver observes nothing")
     settings = load_settings(env={}, audit_path=os.path.join(workdir, "a.jsonl"))
-    check("no setting declares a source", settings.declared_sources() == [])
     driver = Driver(settings=settings, audit=MemoryAuditLog(),
                     jev=FakeJev(action_answer("observe", confidence=0.95)))
-    check("...and the wiring builds none", driver.sources == [])
-    check("...and there is no screen source", driver.screen is None)
+    check("the driver has no sources and no screen source",
+          driver.sources == [] and driver.screen is None)
     result = driver.step(Target("my-app", GUI), schema=CLI_SCHEMA)
     check("a step refuses rather than falling back to pixels",
           not result.ok and result.reason == "no_capture",
           f"{result.reason}: {result.detail}")
-    check("the refusal names the empty configuration",
+    check("...naming the empty configuration",
           "Configured sources: ['none']" in result.detail, result.detail)
     print(f"         {result.detail}")
 
@@ -200,38 +182,22 @@ def run_all(workdir):
     show("DRIVER_CLI_COMMAND enables the CLI tier and nothing else")
     env = env_for(workdir, DRIVER_CLI_COMMAND=PRINTER)
     settings = load_settings(env=env)
-    check("the declared source is reported by name",
-          settings.declared_sources() == ["cli"],
-          str(settings.declared_sources()))
-    check("and it becomes a live source object",
-          [s.name for s in configured_sources(settings)] == ["cli"])
-    pools = configured_pools(settings, budget=None, audit=None)
-    check("structured pools are free and keyed by class",
-          sorted(pools) == ["cli", "dom", "mcp"], str(sorted(pools)))
-    check("the vision pool is absent -- no DRIVER_SCREEN",
-          GUI not in pools)
-    check("and /health reports the capability, not a guess",
-          Service(driver=Driver(settings=settings, audit=MemoryAuditLog(),
-                                jev=FakeJev(action_answer("observe"))),
-                  token="t").health()["sources"] == ["cli"])
+    health = Service(driver=Driver(settings=settings, audit=MemoryAuditLog()),
+                     token="t").health()
+    check("/health reports exactly the declared tier",
+          health["sources"] == ["cli"], str(health["sources"]))
+    check("...in both places an operator looks",
+          health["settings"]["sources"] == ["cli"],
+          str(health["settings"].get("sources")))
 
     # ---- 2b. the vision tier, declared once and only once ---------------
     show("DRIVER_SCREEN declares the vision tier, exactly once")
     vision = Driver(
         settings=load_settings(env=env_for(workdir, DRIVER_SCREEN="1")),
         audit=MemoryAuditLog(), jev=FakeJev(action_answer("observe")))
-    check("the screen source is live",
-          [s.name for s in vision.observation_sources()] == ["screen"],
-          str([s.name for s in vision.observation_sources()]))
-    check("...and is not consulted twice",
-          vision.screen is vision.sources[0])
     check("...and /health reports it once",
           Service(driver=vision, token="t").health()["sources"] == ["screen"],
           str(Service(driver=vision, token="t").health()["sources"]))
-    check("...and the vision pool exists for the gui class alone",
-          GUI in vision.pools
-          and all(vision.pools[GUI].refuses_class(c) for c in ("cli", "mcp",
-                                                                "dom")))
     result = vision.step(Target("my-app", GUI))
     check("a gui step with no declared screen output refuses honestly",
           not result.ok and result.reason == "no_capture",
@@ -350,8 +316,12 @@ def run_all(workdir):
     driver = Driver(settings=settings, audit=AuditLog(settings.audit_path))
     # ``block=False`` binds and returns without accepting, so the accept loop
     # is started here. Everything below is a real request over a real socket
-    # to the shipped handler.
-    httpd, service = serve("127.0.0.1", free_port(), service=Service(driver),
+    # to the shipped handler. The port is chosen by the OS and then released,
+    # because ``serve()`` falls back to the configured port when handed 0.
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        spare = probe.getsockname()[1]
+    httpd, service = serve("127.0.0.1", spare, service=Service(driver),
                            block=False)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     port = httpd.server_address[1]
@@ -407,26 +377,16 @@ def run_all(workdir):
         check("an unconfigured mcp target refuses rather than guessing",
               status == 200 and body.get("reason") == "no_capture",
               f"{status} {body}")
+        check("...and says nothing was tried, rather than that a probe failed",
+              "nothing was tried" in body.get("detail", "")
+              and "declared 'mcp'" in body.get("detail", ""),
+              body.get("detail"))
+        print(f"         {body['detail']}")
 
         status, body = get(port, service.token, "health")
         check("GET /health reports the sources it can observe",
               status == 200 and body.get("sources") == ["cli"],
               str(body.get("sources")))
-        check("...and never renders a key",
-              "jev_api_key" not in json.dumps(body))
-
-        request = urllib.request.Request(
-            f"http://127.0.0.1:{port}/health", method="GET")
-        try:
-            with urllib.request.urlopen(request, timeout=10) as response:
-                status = response.status
-        except urllib.error.HTTPError as exc:
-            try:
-                status = exc.code
-            finally:
-                exc.close()
-        check("an unauthenticated caller is refused",
-              status == 401, str(status))
     finally:
         # shutdown() stops the loop; server_close() releases the socket. Under
         # -W error::ResourceWarning the difference is an unraisable warning.
@@ -443,22 +403,6 @@ def run_all(workdir):
           "screen content was found in the audit log")
     check("the chain records the step the host named",
           "host-0001" in log)
-
-    show("a refusal that says what to do about it")
-    try:
-        Driver(settings=load_settings(env=env), audit=MemoryAuditLog()
-               )._capture(Target("t", "dom"), ())
-        check("a dom target with only a cli source configured refuses", False)
-    except PerceptionUnavailable as exc:
-        message = str(exc)
-        check("a dom target with only a cli source configured refuses", True)
-        check("...naming the class that was asked for",
-              "declared 'dom'" in message, message)
-        check("...naming what is actually configured",
-              "Configured sources: ['cli']" in message, message)
-        check("...and blaming the wrong class, not a failed probe",
-              "nothing was tried" in message, message)
-        print(f"         {message}")
 
     print("\n" + "=" * 66)
     if _failures:

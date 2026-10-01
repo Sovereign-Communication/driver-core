@@ -86,8 +86,7 @@ class Service:
             "keyed": self.driver.settings.keyed,
             "settings": self.driver.settings.redacted(),
             "vocabulary": self.driver.vocabulary.to_dict(),
-            "sources": [s.name
-                        for s in self.driver.observation_sources()],
+            "sources": [s.name for s in self.driver.observation_sources()],
         })
 
     def schemas(self, body=None):
@@ -115,9 +114,8 @@ class Service:
                 # new wire field -- the frozen adapter has always sent one --
                 # but it was being dropped here and the driver minted its
                 # own, which left the audit chain unjoinable to the caller's
-                # own log after the fact. Untrusted, so it is used only as an
-                # opaque label and never as a path or a filename.
-                step_id=body.get("step_id") or None,
+                # own log after the fact.
+                step_id=body.get("step_id"),
                 prefer=tuple(body.get("prefer") or ()),
                 require_stable=bool(body.get("require_stable", True)),
                 # No new wire field: `params` already means "the parameter
@@ -140,30 +138,22 @@ class Service:
     def _resolve_target(self, name):
         """Bind one wire ``schema`` name to a target class and a schema.
 
-        **An absent or unknown name is refused.** It is not defaulted.
-
-        The earlier version resolved ``None`` to the screen schema while
-        leaving the target class undeclared, and an undeclared class permits
-        any source to answer with pixels last. So the one request a caller
-        makes without thinking was the one request that could reach the
-        vision tier and the strongest structured tier at the same time. There
-        is no default that fixes this -- any of the four declared classes
-        would mean silently observing a different machine than the caller
-        named, or spending money -- so the honest answer is to ask.
-
-        One lookup binds the class and its schema together, because two maps
-        over the same strings is how they came to disagree.
+        **An absent or unknown name is refused.** It is not defaulted: the
+        earlier version resolved ``None`` to the screen schema while leaving
+        the class undeclared, and an undeclared class permits any source to
+        answer with pixels last -- so the one request a caller made without
+        thinking was the one that could reach the vision tier at all. There is
+        no default that fixes this, so the service asks.
         """
         from .states import WIRE_TARGETS
-        declared = WIRE_TARGETS
         if name is None or not str(name).strip():
             return {"error": "schema is required; declare one of "
-                             f"{sorted(declared)}"}
+                             f"{sorted(WIRE_TARGETS)}"}
         key = str(name).strip().lower()
-        if key not in declared:
+        if key not in WIRE_TARGETS:
             return {"error": f"unknown schema {name!r}; declared schemas are "
-                             f"{sorted(declared)}"}
-        return declared[key]
+                             f"{sorted(WIRE_TARGETS)}"}
+        return WIRE_TARGETS[key]
 
     def _consent_for(self, body):
         """The consent for this request, bound to one ``(action, params)``.

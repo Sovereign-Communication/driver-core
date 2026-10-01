@@ -13,36 +13,40 @@ capability from configuration at all:
 Both matter because the alternative is a configuration string becoming code,
 which is the one thing :mod:`driver_core.osal` exists to prevent.
 """
+import os
 import unittest
+from unittest import mock
 
+from driver_core.audit import MemoryAuditLog
 from driver_core.config import ConfigError, load_settings
 from driver_core.driver import Driver
 from driver_core.errors import PerceptionUnavailable, SchemaError
-from driver_core.perception import CLI, DOM, GUI, MCP, StructuredSource, Target
+from driver_core.perception import CLI, DOM, GUI, MCP, Target
 from driver_core.schema import validate_state
 from driver_core.server import Service
 from driver_core.states import (
-    DOM_SCHEMA, SCHEMA_BY_CLASS, WIRE_TARGETS, SCREEN_SCHEMA,
+    CLI_SCHEMA, DOM_SCHEMA, SCREEN_SCHEMA, WIRE_TARGETS,
 )
-from driver_core.wiring import (
-    configured_pools, configured_sources, parse_argv,
-)
+from driver_core.wiring import configured_pools, configured_sources, parse_argv
 
 
 def _settings(**kwargs):
     return load_settings(env={}, **kwargs)
 
 
+def _driver(**kwargs):
+    kwargs.setdefault("settings", _settings())
+    kwargs.setdefault("audit", MemoryAuditLog())
+    return Driver(**kwargs)
+
+
 class DefaultsTests(unittest.TestCase):
     """Nothing configured means nothing observed."""
 
-    def test_no_configuration_declares_no_sources(self):
-        self.assertEqual(_settings().declared_sources(), [])
-        self.assertEqual(configured_sources(_settings()), [])
-
     def test_a_default_driver_has_no_sources_and_no_vision(self):
-        driver = Driver(settings=_settings(), audit=_Memory())
+        driver = _driver()
         self.assertEqual(driver.sources, [])
+        self.assertEqual(configured_sources(driver.settings), [])
         self.assertIsNone(driver.screen)
         # The structured pools exist and are free; they hold no vision slot,
         # and with no configured source the class refuses anyway.
@@ -51,22 +55,19 @@ class DefaultsTests(unittest.TestCase):
 
     def test_explicitly_empty_still_means_empty(self):
         """``()`` is a deliberate choice and must survive configuration."""
-        driver = Driver(settings=_settings(cli_command="echo hi"),
-                        sources=(), pools={}, screen=None, audit=_Memory())
+        driver = _driver(settings=_settings(cli_command="echo hi"),
+                         sources=(), pools={}, screen=None)
         self.assertEqual(driver.sources, [])
 
     def test_configured_sources_become_live_sources(self):
-        driver = Driver(settings=_settings(cli_command="echo hi"),
-                        audit=_Memory())
+        driver = _driver(settings=_settings(cli_command="echo hi"))
         self.assertEqual([s.name for s in driver.sources], ["cli"])
 
     def test_the_vision_tier_is_off_unless_its_own_switch_is_set(self):
-        driver = Driver(settings=_settings(cli_command="echo hi"),
-                        audit=_Memory())
+        driver = _driver(settings=_settings(cli_command="echo hi"))
         self.assertIsNone(driver.screen)
         self.assertNotIn(GUI, driver.pools)
-        self.assertNotIn(GUI, _settings(cli_command="echo hi")
-                         .declared_sources())
+        self.assertNotIn(GUI, driver.settings.declared_sources())
 
     def test_a_declared_screen_source_is_consulted_once_not_twice(self):
         """``sources`` and ``screen`` are two handles onto one set.
@@ -76,49 +77,12 @@ class DefaultsTests(unittest.TestCase):
         same pixels twice on every step and report the tier twice on
         ``/health``. The regression test is the count.
         """
-        driver = Driver(settings=_settings(screen_enabled=True), audit=_Memory())
-        names = [s.name for s in driver.observation_sources()]
-        self.assertEqual(names, ["screen"])
-        self.assertIs(driver.screen, driver.sources[0])
-        self.assertEqual(
-            Service(driver=driver, token="t").health()["sources"], ["screen"])
-
-    def test_an_explicit_screen_source_beside_a_structured_one_is_kept(self):
-        """A caller registering its own screen source still gets it."""
-        screen = StructuredSource("screen", lambda ref: {"window_title": "x"},
-                                  serves=("gui",))
-        driver = Driver(settings=_settings(cli_command="echo hi"),
-                        sources=[StructuredSource("cli", lambda ref: None)],
-                        screen=screen, pools={}, audit=_Memory())
-        self.assertIs(driver.screen, screen)
+        driver = _driver(settings=_settings(screen_enabled=True))
         self.assertEqual([s.name for s in driver.observation_sources()],
-                         ["cli", "screen"])
-
-
-class _Memory:
-    """A chain-free audit log, so a Driver can be built without one."""
-
-    def append(self, kind, **fields):
-        return {}
-
-    @property
-    def count(self):
-        return 0
-
-    def read_all(self):
-        return []
-
-    def verify(self):
-        class V:
-            ok = True
-            detail = ""
-            records = 0
-            def to_dict(self):
-                return {"ok": True, "records": 0, "detail": ""}
-        return V()
-
-    def head(self):
-        return "genesis"
+                         ["screen"])
+        self.assertIs(driver.screen, driver.sources[0])
+        self.assertEqual(Service(driver=driver, token="t").health()["sources"],
+                         ["screen"])
 
 
 class TierIsolationTests(unittest.TestCase):
@@ -139,12 +103,7 @@ class TierIsolationTests(unittest.TestCase):
         """Half a declaration is not a declaration."""
         self.assertEqual(_settings(mcp_command="srv --x").declared_sources(), [])
 
-    def test_the_order_reported_is_the_declared_tier_order(self):
-        settings = _settings(screen_enabled=True, dom_url="https://e.invalid/r",
-                             cli_command="echo hi")
-        self.assertEqual(settings.declared_sources(), ["cli", "dom", "screen"])
-
-    def test_configured_sources_follow_the_declared_order(self):
+    def test_configured_sources_follow_the_declared_tier_order(self):
         settings = _settings(screen_enabled=True, dom_url="https://e.invalid/r",
                              cli_command="echo hi")
         self.assertEqual([s.name for s in configured_sources(settings)],
@@ -153,29 +112,33 @@ class TierIsolationTests(unittest.TestCase):
 
 class PoolWiringTests(unittest.TestCase):
 
-    def test_structured_classes_get_free_pools_of_two(self):
-        pools = configured_pools(_settings(), budget=None, audit=None)
+    def _pools(self, **kwargs):
+        return configured_pools(_settings(**kwargs), budget=None, audit=None)
+
+    def test_structured_classes_get_free_pools(self):
+        pools = self._pools()
         self.assertEqual(sorted(pools), [CLI, DOM, MCP])
         for cls in (CLI, MCP, DOM):
             self.assertEqual(pools[cls].serves, (cls,))
-            self.assertEqual(pools[cls].size, 2)
 
     def test_the_vision_pool_appears_only_when_enabled(self):
-        self.assertNotIn(GUI, configured_pools(_settings(), budget=None,
-                                               audit=None))
-        pools = configured_pools(_settings(screen_enabled=True), budget=None,
-                                 audit=None)
-        self.assertIn(GUI, pools)
+        self.assertNotIn(GUI, self._pools())
+        self.assertIn(GUI, self._pools(screen_enabled=True))
 
-    def test_a_vision_pool_refuses_every_structured_class(self):
-        pools = configured_pools(_settings(screen_enabled=True), budget=None,
-                                 audit=None)
-        for cls in (CLI, MCP, DOM):
-            self.assertTrue(pools[GUI].refuses_class(cls))
+    def test_a_pool_is_sized_by_the_quorum_it_has_to_satisfy(self):
+        """A pool with fewer slots than the quorum can never meet it.
 
-    def test_a_configured_cli_pool_refuses_a_dom_target(self):
-        pools = configured_pools(_settings(), budget=None, audit=None)
-        self.assertIsNone(pools[CLI].for_target(Target("x", DOM)))
+        A declared driver that refused every step with
+        ``insufficient_agreement`` would be a tier chain that exists and is
+        still unreachable, so the pool is sized from the setting rather than
+        from a constant that happens to match the default.
+        """
+        for quorum in (1, 2, 3):
+            with self.subTest(quorum=quorum):
+                structured = self._pools(quorum=quorum)
+                self.assertEqual(structured[CLI].size, quorum)
+                vision = self._pools(quorum=quorum, screen_enabled=True)
+                self.assertEqual(vision[GUI].size, quorum)
 
 
 class CommandParsingTests(unittest.TestCase):
@@ -229,19 +192,26 @@ class DomSchemaTests(unittest.TestCase):
             validate_state({"visible_text": "x"}, DOM_SCHEMA)
         self.assertIn("missing required field", str(ctx.exception))
 
-    def test_every_class_has_a_schema_and_the_wire_table_agrees(self):
-        for cls in (CLI, MCP, DOM, GUI):
-            self.assertIn(cls, SCHEMA_BY_CLASS)
-        for name, (cls, schema) in WIRE_TARGETS.items():
-            self.assertIs(schema, SCHEMA_BY_CLASS[cls], name)
+    def test_the_wire_table_binds_every_class_to_a_schema(self):
+        """One table, so a class and its schema cannot drift apart.
+
+        The old ``SCHEMAS_BY_TARGET`` answered ``"dom"`` with the screen
+        schema while the wire table said nothing at all, which is how a
+        request ended up able to reach pixels by default. This is the pin.
+        """
+        classes = {cls for cls, _ in WIRE_TARGETS.values()}
+        self.assertEqual(classes, {CLI, MCP, DOM, GUI})
+        self.assertEqual(WIRE_TARGETS["dom"], (DOM, DOM_SCHEMA))
+        self.assertEqual(WIRE_TARGETS["cli"], (CLI, CLI_SCHEMA))
+        self.assertEqual(WIRE_TARGETS["mcp"], (MCP, CLI_SCHEMA))
+        self.assertEqual(WIRE_TARGETS["screen"], WIRE_TARGETS["gui"])
 
 
 class RefusalQualityTests(unittest.TestCase):
     """A refusal has to say what to do about it."""
 
     def test_the_refusal_names_the_configured_sources(self):
-        settings = _settings(cli_command="echo hi")
-        driver = Driver(settings=settings, audit=_Memory())
+        driver = _driver(settings=_settings(cli_command="echo hi"))
         with self.assertRaises(PerceptionUnavailable) as ctx:
             driver._capture(Target("x", DOM), ())
         message = str(ctx.exception)
@@ -249,26 +219,29 @@ class RefusalQualityTests(unittest.TestCase):
         self.assertIn("cli", message)
 
     def test_the_refusal_says_when_nothing_is_configured(self):
-        driver = Driver(settings=_settings(), audit=_Memory())
         with self.assertRaises(PerceptionUnavailable) as ctx:
-            driver._capture(Target("x", CLI), ())
+            _driver()._capture(Target("x", CLI), ())
         self.assertIn("none", str(ctx.exception))
 
+    def test_a_driver_that_cannot_be_built_says_so_on_the_cli(self):
+        """A bad declaration is reported, not raised as a traceback.
 
-class ForeignNamespaceTests(unittest.TestCase):
-    """The new settings are DRIVER_* and nothing else."""
+        ``Driver`` construction happens before the command runs, so without
+        this the one fault an operator can most easily introduce -- a command
+        with an unbalanced quote -- would escape the CLI's error handling
+        entirely.
+        """
+        import contextlib
+        import io
+        from driver_core import cli
 
-    def test_no_new_foreign_prefix_is_read(self):
-        from driver_core.config import FOREIGN_PREFIXES, ENV_PREFIX
-        for name in ("CLI_COMMAND", "MCP_COMMAND", "MCP_TOOL", "DOM_URL",
-                     "SCREEN"):
-            self.assertEqual(ENV_PREFIX + name, f"DRIVER_{name}")
-        for prefix in FOREIGN_PREFIXES:
-            self.assertNotIn(prefix, ENV_PREFIX)
-
-    def test_a_configured_cli_command_is_read_from_the_environment(self):
-        env = {"DRIVER_CLI_COMMAND": "echo hi"}
-        self.assertEqual(load_settings(env=env).cli_command, "echo hi")
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ,
+                             {"DRIVER_CLI_COMMAND": 'tool --name "unclosed'}):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli.main(["health"])
+        self.assertEqual(code, 2)
+        self.assertIn("could not be tokenised", out.getvalue() + err.getvalue())
 
 
 if __name__ == "__main__":

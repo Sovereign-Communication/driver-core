@@ -230,8 +230,11 @@ def main(argv=None):
     # clobber DRIVER_DRY_RUN from the environment, which is a quieter bug
     # than it looks -- the flag would appear to do nothing.
     settings = load_settings(**({"dry_run": True} if args.dry_run else {}))
-    driver = Driver(settings=settings)
     try:
+        # Inside the try: a declared source that cannot even be tokenised is a
+        # configuration fault, and it has to be reported like every other one
+        # rather than as a traceback out of the constructor.
+        driver = Driver(settings=settings)
         return COMMANDS[args.command](args, driver)
     except Exception as exc:
         print(f"[error] {type(exc).__name__}: {exc}", file=sys.stderr)

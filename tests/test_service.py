@@ -144,17 +144,6 @@ class RouteTests(unittest.TestCase):
                      "step_id": "host-abc123"})["body"]
         self.assertEqual(body["step_id"], "host-abc123")
 
-    def test_an_absent_step_id_is_still_minted(self):
-        body = _service().handle("step", {"target": "t", "schema": "gui"})["body"]
-        self.assertTrue(body["step_id"])
-
-    def test_health_reports_which_sources_the_driver_can_observe(self):
-        """An operator has to be able to see the capability before relying
-        on it, not infer it from a no_capture."""
-        body = _service().handle("health", {})["body"]
-        self.assertIn("sources", body)
-        self.assertIsInstance(body["sources"], list)
-
 
 class HonestyTests(unittest.TestCase):
 

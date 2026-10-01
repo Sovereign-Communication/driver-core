@@ -52,7 +52,7 @@ from .executor_registry import build_driver_registry
 from .extractors import ExtractorPool
 from .jev_client import JevClient
 from .perception import select_capture
-from .states import SCHEMAS_BY_TARGET
+from .states import SCREEN_SCHEMA
 from .wiring import configured_pools, configured_sources
 
 
@@ -186,10 +186,7 @@ class Driver:
         operator and consented to as a single ``(action, params)`` pair.
         """
         step_id = step_id or uuid.uuid4().hex[:12]
-        schema = schema or SCHEMAS_BY_TARGET.get("screen")
-        if schema is None:
-            raise PerceptionUnavailable("no schema was supplied and none could "
-                                        "be inferred for this target")
+        schema = schema or SCREEN_SCHEMA
 
         # 1. capture
         try:
