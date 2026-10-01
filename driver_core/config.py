@@ -58,6 +58,35 @@ DEFAULT_CONFIDENCE_THRESHOLD = 0.70
 DEFAULT_QUORUM = 2
 DEFAULT_MIN_AGREEMENT = 1.0
 
+#: The shortest token this package will accept from an operator. The REST
+#: token is the only thing standing between a loopback caller and the action
+#: tier, and it is bearer-only: whoever holds it may execute anything consent
+#: allows. 16 characters of base64url is roughly 96 bits, which is below any
+#: brute-force budget worth naming, so a shorter value is refused rather than
+#: accepted with a warning nobody reads. Randomly generated tokens are longer
+#: than this by construction and are not checked against it.
+MIN_TOKEN_LENGTH = 16
+
+
+def validated_token(value, source):
+    """Return ``value`` if it is an acceptable declared token, else refuse.
+
+    One rule, one owner, because the failure it prevents is a service that
+    binds with a credential too weak to matter -- which looks exactly like a
+    service that is working. The *length* is never echoed and neither is any
+    part of the value: a rejection message reaches a terminal and a log, and
+    a log is somewhere a credential ends up.
+    """
+    if not value or not value.strip():
+        raise ConfigError(
+            f"{source} was declared but is blank; either give it a real "
+            f"value or unset it to get a generated one")
+    if len(value) < MIN_TOKEN_LENGTH:
+        raise ConfigError(
+            f"{source} is shorter than the {MIN_TOKEN_LENGTH}-character "
+            f"minimum for a bearer token")
+    return value
+
 
 def _env_bool(env, name, default):
     raw = env.get(ENV_PREFIX + name)
@@ -105,6 +134,13 @@ class Settings:
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
     jev_api_key: str = field(default="", repr=False)
+    #: The REST bearer token, when an operator declares one. A credential:
+    #: excluded from ``repr`` so it cannot reach a traceback, and absent from
+    #: ``redacted()`` because that dict is printed by ``/health``. When empty
+    #: the service generates one per process, which is the safe default for a
+    #: caller driving the service in-process and useless for one that needs a
+    #: token it can present -- hence the setting.
+    token: str = field(default="", repr=False)
     jev_model: str = "jev-latest"
     extractor_pool: tuple = ()
     step_ceiling_usd: float = DEFAULT_STEP_CEILING_USD
@@ -146,6 +182,8 @@ class Settings:
             raise ConfigError(
                 f"run ceiling ${self.run_ceiling_usd} is below the step ceiling "
                 f"${self.step_ceiling_usd}, so no step could ever run")
+        if self.token:
+            validated_token(self.token, "the declared token")
 
     @property
     def keyed(self):
@@ -155,8 +193,12 @@ class Settings:
     def redacted(self):
         """The settings as they may be printed or logged.
 
-        The API key is never rendered, not even truncated -- a prefix of a
-        credential is still a credential, and this dict is destined for logs.
+        Neither credential is rendered, not even truncated -- a prefix of a
+        secret is still a secret, and this dict is destined for logs and for
+        the body of ``GET /health``. That is why there is no ``token`` key
+        rather than a masked one: a host that needs the token already holds
+        it, and a host that does not must not be able to read it off a
+        loopback endpoint that any local process can reach.
         """
         data = {
             "base_url": self.base_url,
@@ -188,11 +230,18 @@ def load_settings(env=None, **overrides):
     env = os.environ if env is None else env
     pool_raw = env.get(ENV_PREFIX + "EXTRACTOR_POOL", "")
     pool = tuple(p.strip() for p in pool_raw.split(",") if p.strip())
+    # Presence is the whole signal here: an operator who sets DRIVER_TOKEN to
+    # the empty string has made a mistake worth naming, whereas an operator who
+    # never mentions it has asked for the generated default. Reading it with
+    # ``.get(..., "")`` would silently collapse those two into one.
+    token = validated_token(env[ENV_PREFIX + "TOKEN"], "DRIVER_TOKEN") \
+        if ENV_PREFIX + "TOKEN" in env else ""
     settings = Settings(
         base_url=env.get(ENV_PREFIX + "BASE_URL", DEFAULT_BASE_URL).rstrip("/"),
         host=env.get(ENV_PREFIX + "HOST", DEFAULT_HOST),
         port=_env_int(env, "PORT", DEFAULT_PORT),
         jev_api_key=env.get(ENV_PREFIX + "JEV_API_KEY", ""),
+        token=token,
         jev_model=env.get(ENV_PREFIX + "JEV_MODEL", "jev-latest"),
         extractor_pool=pool,
         step_ceiling_usd=_env_float(env, "STEP_CEILING_USD",

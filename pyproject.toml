@@ -4,6 +4,20 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "driver-core"
+# The version is written here and in driver_core/__init__.py, and
+# tests/test_service.py asserts the two agree -- `GET /health` reports the
+# package's copy, and a wheel that disagreed with the service it ships would be
+# a genuinely confusing bug to chase. A `[tool.setuptools.dynamic]` entry would
+# remove the second copy instead, but it makes the build depend on importing
+# the package, and a test catches the drift that actually matters without
+# touching packaging.
+# 3.2.0: a host can supply the REST token it will present (DRIVER_TOKEN), so
+# the service is no longer reachable only by a caller that cannot hold a
+# credential for it. `serve --print-token` becomes a query that binds nothing,
+# `serve(port=0)` now means an ephemeral port instead of silently falling back
+# to 8791, and `serve` reports the address it actually bound rather than the
+# arguments it was given (`http://None:8791`). `/health` gains `version`.
+# STOP_REASONS, StepResult.to_dict() and the request field set are unchanged.
 # 3.1.0: each fact has one owner. The settings and the driver no longer both
 # answer "which perception tiers are live" -- `/health` drops the
 # `settings.sources` duplicate and its top-level `sources` is the answer -- the
@@ -11,6 +25,7 @@ name = "driver-core"
 # "what does this wire `schema` mean" is decided in one place instead of
 # separately in the CLI and the service. POST /step is unchanged: same fields,
 # same STOP_REASONS, same StepResult.to_dict().
+version = "3.2.0"
 # 3.0.0: the perception tiers are reachable from the product. Sources are
 # registered from declared DRIVER_* settings (DRIVER_CLI_COMMAND,
 # DRIVER_MCP_COMMAND + DRIVER_MCP_TOOL, DRIVER_DOM_URL, DRIVER_SCREEN), and an
@@ -19,7 +34,6 @@ name = "driver-core"
 # StepResult.to_dict() are byte-identical to 2.x -- but a host that omitted
 # `schema` used to receive a 200 built on an *undeclared* target class, and an
 # undeclared class permits any source to answer with pixels last.
-version = "3.1.0"
 description = "Verified extraction -> Jev decision -> deterministic action, for driving a local machine safely."
 readme = "README.md"
 requires-python = ">=3.9"

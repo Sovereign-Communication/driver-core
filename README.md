@@ -303,8 +303,21 @@ driver-core vocabulary                   # the closed action set
 driver-core schema                       # the declared extraction schemas
 driver-core --dry-run step "my-app"      # rehearse a step; no side effects
 driver-core verify                       # re-hash the audit chain
-driver-core serve --print-token          # loopback REST surface
 ```
+
+To run the REST surface, declare the token you intend to present and then
+start it. `--print-token` answers *before* anything binds, so a host can read
+the token without starting the service twice:
+
+```bash
+export DRIVER_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(24))')"
+driver-core serve --print-token          # echoes $DRIVER_TOKEN; binds nothing
+driver-core serve                        # loopback REST, announces its address
+```
+
+`--print-token` is a query, not a handshake: it binds no port, and with no
+`DRIVER_TOKEN` declared it **refuses**, because a generated token dies with the
+process that made it and there is nothing to hand a caller.
 
 A step needs to know *what kind* of thing it is observing, and that is
 explicit on both surfaces — `--schema` on the CLI (default `gui`) and a
@@ -372,6 +385,9 @@ in flight, and it must never read another project's keys or state.
 | `DRIVER_DRY_RUN` | `false` | rehearse without side effects |
 | `DRIVER_ALLOW_WRITE` | `false` | register the executors that have side effects |
 | `DRIVER_AUDIT_PATH` | OS state dir | the hash-chained log |
+| `DRIVER_TOKEN` | generated | the REST bearer token; set it to one you hold |
+| `DRIVER_HOST` | `127.0.0.1` | loopback only; an empty value does not widen it |
+| `DRIVER_PORT` | `8791` | `0` asks the OS for a free port |
 | `DRIVER_CLI_COMMAND` | — | declare the `cli` tier; tokenised, never shelled |
 | `DRIVER_MCP_COMMAND` | — | declare the `mcp` tier (needs `DRIVER_MCP_TOOL` too) |
 | `DRIVER_MCP_TOOL` | — | the tool to call; half a declaration enables nothing |
@@ -444,6 +460,16 @@ The server binds loopback and requires a bearer token. **That is a floor, not
 a security claim.** A local process can read your screen, and a driver holding
 that capability deserves more scepticism than a token header provides.
 
+Declare the token with `DRIVER_TOKEN` so you hold the one your service uses; a
+token generated per process is right for a caller driving the service
+in-process and useless for one integrating over HTTP. One that is declared
+blank or under 16 characters is refused by name at load, because a service
+bound with a credential too weak to matter looks exactly like a service that is
+working. The token is never echoed — not in `health`, not in `redacted()`, not
+in a `repr`, and not in a refusal message — because it belongs in a header you
+already hold, and `health` is reachable by anything that can open a loopback
+socket. What `health` reports instead is `version`.
+
 What the token check does guarantee is that a refusal is a refusal. A wrong
 token is a **401** on every path shape, method, and body size — including a
 non-ASCII one, which is the case a naive `compare_digest` on text turns into
@@ -463,7 +489,7 @@ Before pointing this at a real machine:
 ## Development
 
 ```bash
-python -m unittest discover -s tests -t .    # 299 hermetic tests
+python -m unittest discover -s tests -t .    # 326 hermetic tests
 ruff check driver_core tests tools
 python tools/tier_order_run.py               # the tier chain, live
 python tools/live_action_run.py              # a declared action, live

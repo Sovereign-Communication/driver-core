@@ -217,11 +217,33 @@ may change it, and the ones that used to be stated twice now are not.
 | The ordered chain a step may consult | `Driver.sources` | `screen` is derived from it |
 | The pipeline order and the budget per step | `Driver` | — |
 | Whether a request is authorised | `Handler._authorised` | the only place a token is read |
+| Whether a declared token is acceptable | `config.validated_token` | one rule, applied where `DRIVER_TOKEN` is read |
+| Which port and host were bound | `serve`, from `server_address` | not from the arguments it was handed |
 | Endpoint logic, free of HTTP | `Service` | `Handler` adds transport and nothing else |
 
-Four of these were stated more than once, or crowded together, and each had
+Six of these were stated more than once, or crowded together, and each had
 already cost something:
-
+* **The REST token was checked but could not be held.** `Service` minted one
+  per process and the only way to read it was a CLI flag that bound the port,
+  printed, and exited — so the credential it produced belonged to a process
+  that no longer existed. The token is now a declared `DRIVER_TOKEN`, which is
+  also where the one rule about its acceptability lives, and `redacted()`
+  deliberately has no `token` key rather than a masked one: a host that needs
+  the token already holds it, and a host that does not must not be able to read
+  it off an endpoint any local process can reach. The asymmetry is worth
+  stating: a *configured* token is policed, an explicit `Service(token=…)` is
+  not, because that caller wrote the credential in the same breath as the code
+  presenting it and can already reach every executor.
+* **`serve` reported the arguments it was given, not the socket it bound.**
+  `cmd_serve` printed `http://{args.host}:{args.port}` from argparse defaults
+  that are `None`, so the operator was told the service was on
+  `http://None:8791` — and only in the branch that was *not* listening, while
+  the branch that was listening said nothing. The address now comes from
+  `server_address` through an opt-in `announce`, which is the only moment it is
+  knowable. The same function also treated `port=0` as unset, so the one value
+  a caller passes meaning "any free port" silently became 8791; the host keeps
+  the opposite rule on purpose, because `bind("")` is `INADDR_ANY` and this
+  server promises loopback only.
 * **The perception tier was one file carrying five concerns** — chain policy,
   a generic source, three concrete adapters, JSON-RPC response parsing, and an
   HTML parser written as a closure inside `read_document`. Chain policy

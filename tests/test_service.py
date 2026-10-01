@@ -284,5 +284,121 @@ class CliTests(unittest.TestCase):
                           "a", "--grant-params", '{"content": "x"}'])
 
 
+class ServeCliTests(unittest.TestCase):
+    """``driver-core serve`` and the token a host has to be able to hold."""
+
+    TOKEN = "declared-token-0123456789abcdef"
+
+    def _run(self, argv, env=None):
+        import contextlib
+        import io
+        import os
+        from unittest import mock
+        from driver_core import cli
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            if env is None:
+                code = cli.main(argv)
+            else:
+                # Keep the ambient non-DRIVER_* variables -- HOME and its
+                # equivalents are needed to locate the audit log -- and make
+                # the DRIVER_* set exactly what this case declares, so a
+                # developer's own environment cannot change the answer.
+                base = {k: v for k, v in os.environ.items()
+                        if not k.startswith("DRIVER_")}
+                with mock.patch.dict(os.environ, {**base, **env}, clear=True):
+                    code = cli.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_print_token_emits_only_the_token_on_stdout(self):
+        """So a host can do ``TOKEN=$(driver-core serve --print-token)``
+        without parsing a decorated line."""
+        code, out, err = self._run(["serve", "--print-token"],
+                                   env={"DRIVER_TOKEN": self.TOKEN})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.strip(), self.TOKEN)
+        self.assertEqual(out.count("\n"), 1)
+
+    def test_print_token_binds_nothing(self):
+        """It used to bind the port, print, and exit -- producing a token no
+        surviving process could present, so the host had to start the service
+        twice and scrape stdout from a process it had just lost."""
+        from unittest import mock
+        from driver_core import server
+        with mock.patch.object(server, "ThreadingHTTPServer") as binder:
+            self._run(["serve", "--print-token"],
+                      env={"DRIVER_TOKEN": self.TOKEN})
+        binder.assert_not_called()
+
+    def test_print_token_without_a_declared_token_refuses(self):
+        code, out, err = self._run(["serve", "--print-token"], env={})
+        self.assertEqual(code, 2)
+        self.assertEqual(out.strip(), "")
+        self.assertIn("DRIVER_TOKEN", err)
+        # The message has to say why, or the operator retries the same command.
+        self.assertIn("generated", err)
+
+    def test_a_declared_token_makes_print_token_and_serve_agree(self):
+        """The whole point: the token printed before the service starts is the
+        token the running service will accept."""
+        from driver_core.config import load_settings
+        from driver_core.driver import Driver
+        from driver_core.server import Service
+        from driver_core.audit import MemoryAuditLog
+        _, out, _ = self._run(["serve", "--print-token"],
+                              env={"DRIVER_TOKEN": self.TOKEN})
+        service = Service(Driver(settings=load_settings(
+            env={"DRIVER_TOKEN": self.TOKEN}), audit=MemoryAuditLog()))
+        self.assertEqual(out.strip(), service.token)
+
+    def test_a_blank_token_is_reported_not_traced(self):
+        """A configuration fault must read like one. ``load_settings`` used to
+        run outside the CLI's try, so this escaped as a traceback."""
+        code, out, err = self._run(["health"], env={"DRIVER_TOKEN": ""})
+        self.assertEqual(code, 2)
+        self.assertIn("ConfigError", err)
+        self.assertIn("blank", err)
+        self.assertNotIn("Traceback", err + out)
+
+    def test_a_short_token_is_reported_not_traced(self):
+        code, out, err = self._run(["health"], env={"DRIVER_TOKEN": "abc"})
+        self.assertEqual(code, 2)
+        self.assertIn("shorter than", err)
+        self.assertNotIn("abc", err)
+        self.assertNotIn("Traceback", err + out)
+
+    def test_a_settings_fault_of_any_kind_is_reported_not_traced(self):
+        """Not just the token: the settings load is inside the try now, so
+        every declared setting fails the same way."""
+        code, _, err = self._run(["health"], env={"DRIVER_QUORUM": "0"})
+        self.assertEqual(code, 2)
+        self.assertIn("quorum", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_health_reports_the_version_the_wheel_was_built_from(self):
+        """``/health`` exists so a host can tell what it is talking to. That
+        only helps if the number it reports is the number the package was
+        built and released as, so the two copies are pinned together."""
+        import pathlib
+        import re
+        import driver_core
+        pyproject = pathlib.Path(__file__).resolve().parent.parent / "pyproject.toml"
+        declared = re.search(r'^version = "([^"]+)"', pyproject.read_text(
+            encoding="utf-8"), re.MULTILINE)
+        self.assertIsNotNone(declared, "pyproject.toml declares no version")
+        self.assertEqual(declared.group(1), driver_core.__version__)
+
+    def test_health_reports_that_version_over_the_wire(self):
+        import json
+        from driver_core import __version__
+        import contextlib
+        import io
+        from driver_core import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            cli.main(["--json", "health"])
+        self.assertEqual(json.loads(out.getvalue())["version"], __version__)
+
+
 if __name__ == "__main__":
     unittest.main()

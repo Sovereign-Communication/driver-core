@@ -23,7 +23,7 @@ import threading
 import unittest
 
 from driver_core.audit import MemoryAuditLog
-from driver_core.config import load_settings
+from driver_core.config import MIN_TOKEN_LENGTH, ConfigError, load_settings
 from driver_core.driver import Driver
 from driver_core.server import Service, serve
 
@@ -295,6 +295,208 @@ class RestAuthTests(unittest.TestCase):
             with self.subTest(method=method):
                 self.refused(f"{method} unauthenticated", method, "/health",
                              body=b"{}" if method == "POST" else None)
+
+
+class TokenProvisioningTests(unittest.TestCase):
+    """A host must be able to supply the token it will later present.
+
+    The token check is only useful if the caller can hold the token. Before
+    this, the only way to learn one was ``serve --print-token``, which bound
+    the port, printed, and exited -- handing back a credential no surviving
+    process could present, so a host had to start the service twice. These
+    tests cover the provisioning side, over a real socket where the claim is
+    about what a caller receives.
+    """
+
+    DECLARED = "declared-token-0123456789abcdef"
+
+    def driver_for(self, env):
+        return Driver(settings=load_settings(env=env), audit=MemoryAuditLog())
+
+    def test_a_declared_token_is_the_one_the_service_presents(self):
+        env = {"DRIVER_TOKEN": self.DECLARED}
+        service = Service(self.driver_for(env))
+        self.assertEqual(service.token, self.DECLARED)
+
+    def test_no_declared_token_still_gets_a_generated_one(self):
+        service = Service(self.driver_for({}))
+        self.assertTrue(service.token)
+        self.assertNotEqual(service.token, "")
+        # Two services in one process must not share a credential.
+        self.assertNotEqual(Service(self.driver_for({})).token, service.token)
+
+    def test_a_generated_token_is_long_enough_to_be_usable(self):
+        self.assertGreaterEqual(len(Service(self.driver_for({})).token),
+                                MIN_TOKEN_LENGTH)
+
+    def test_an_explicit_argument_beats_the_declared_token(self):
+        env = {"DRIVER_TOKEN": self.DECLARED}
+        service = Service(self.driver_for(env), token="explicit")
+        self.assertEqual(service.token, "explicit")
+
+    def test_a_blank_declared_token_is_refused(self):
+        for value in ("", "   ", "\t"):
+            with self.subTest(value=repr(value)):
+                with self.assertRaises(ConfigError) as ctx:
+                    load_settings(env={"DRIVER_TOKEN": value})
+                self.assertIn("blank", str(ctx.exception))
+
+    def test_a_trivially_short_declared_token_is_refused(self):
+        for value in ("t", "abc123", "x" * (MIN_TOKEN_LENGTH - 1)):
+            with self.subTest(length=len(value)):
+                with self.assertRaises(ConfigError) as ctx:
+                    load_settings(env={"DRIVER_TOKEN": value})
+                self.assertIn(str(MIN_TOKEN_LENGTH), str(ctx.exception))
+
+    def test_a_token_of_exactly_the_minimum_is_accepted(self):
+        value = "x" * MIN_TOKEN_LENGTH
+        self.assertEqual(load_settings(env={"DRIVER_TOKEN": value}).token, value)
+
+    def test_the_refusal_does_not_echo_the_token(self):
+        """A rejection message reaches a terminal and a log, and a log is
+        somewhere a credential ends up. The value must never appear in it."""
+        secret = "hunter2-" + "z" * 20
+        with self.assertRaises(ConfigError) as ctx:
+            load_settings(env={"DRIVER_TOKEN": secret[:5]})
+        self.assertNotIn(secret[:5], str(ctx.exception))
+
+    def test_the_token_is_absent_from_repr_and_redacted(self):
+        env = {"DRIVER_TOKEN": self.DECLARED}
+        settings = load_settings(env=env)
+        self.assertNotIn(self.DECLARED, repr(settings))
+        self.assertNotIn(self.DECLARED, str(settings))
+        self.assertNotIn(self.DECLARED, repr(settings.redacted()))
+        self.assertNotIn("token", settings.redacted())
+
+    def test_the_token_is_absent_from_a_health_response(self):
+        """The credential belongs in a header the caller already holds. Any
+        local process can reach this endpoint, so publishing the token there
+        would hand it to every one of them."""
+        env = {"DRIVER_TOKEN": self.DECLARED}
+        httpd, _ = serve("127.0.0.1", _free_port(),
+                          service=Service(self.driver_for(env)), block=False)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            conn = http.client.HTTPConnection(
+                "127.0.0.1", httpd.server_address[1], timeout=10)
+            conn.request("GET", "/health",
+                         headers={"Authorization": f"Bearer {self.DECLARED}"})
+            body = conn.getresponse().read().decode()
+            conn.close()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=10)
+        self.assertNotIn(self.DECLARED, body)
+        # ...but the version is, so a host can tell what it is talking to.
+        self.assertIn('"version"', body)
+
+    def test_a_declared_token_authenticates_over_a_real_socket(self):
+        env = {"DRIVER_TOKEN": self.DECLARED}
+        httpd, _ = serve("127.0.0.1", _free_port(),
+                          service=Service(self.driver_for(env)), block=False)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        port = httpd.server_address[1]
+
+        def status_for(token):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            try:
+                headers = ({} if token is None
+                           else {"Authorization": f"Bearer {token}"})
+                conn.request("GET", "/health", headers=headers)
+                return conn.getresponse().status
+            finally:
+                conn.close()
+
+        try:
+            self.assertEqual(status_for(None), 401)
+            self.assertEqual(status_for("wrong-" + "y" * 24), 401)
+            self.assertEqual(status_for(self.DECLARED), 200)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=10)
+
+    def test_a_declared_token_does_not_change_the_request_contract(self):
+        """Authenticating must not have moved the wire. Same eleven keys,
+        same stop reasons, same fail-closed schema."""
+        from driver_core.server import STOP_REASONS
+        env = {"DRIVER_TOKEN": self.DECLARED}
+        service = Service(self.driver_for(env))
+        health = service.health()
+        self.assertEqual(sorted(health),
+                         ["keyed", "ok", "settings", "sources", "status",
+                          "version", "vocabulary"])
+        self.assertEqual(len(STOP_REASONS), 9)
+
+
+class ServeBindingTests(unittest.TestCase):
+    """``serve`` has to report and honour the socket it actually bound."""
+
+    def test_port_zero_asks_for_an_ephemeral_port(self):
+        """``port or settings.port`` treats 0 as unset, so the one value a
+        caller passes meaning "any free port" silently became 8791."""
+        httpd, _ = serve("127.0.0.1", 0, block=False)
+        try:
+            self.assertNotEqual(httpd.server_address[1], 0)
+            self.assertNotEqual(httpd.server_address[1], 8791)
+        finally:
+            httpd.server_close()
+
+    def test_omitted_host_and_port_fall_back_to_the_settings(self):
+        port = _free_port()
+        env = {"DRIVER_HOST": "127.0.0.1", "DRIVER_PORT": str(port)}
+        wanted = load_settings(env=env)
+        driver = Driver(settings=wanted, audit=MemoryAuditLog())
+        httpd, _ = serve(service=Service(driver), block=False)
+        try:
+            self.assertEqual(httpd.server_address[:2],
+                             (wanted.host, wanted.port))
+        finally:
+            httpd.server_close()
+
+    def test_an_explicit_port_still_wins_over_the_settings(self):
+        port = _free_port()
+        httpd, _ = serve("127.0.0.1", port, block=False)
+        try:
+            self.assertEqual(httpd.server_address[1], port)
+        finally:
+            httpd.server_close()
+
+    def test_an_empty_host_falls_back_to_loopback_rather_than_binding_all(self):
+        """``bind(("", port))`` is INADDR_ANY: it listens on every interface,
+        which is the one thing a server that documents itself as loopback-only
+        must not do. So ``""`` is not a value the host rule will honour, even
+        though ``0`` is a value the port rule does.
+        """
+        httpd, _ = serve("", 0, block=False)
+        try:
+            self.assertEqual(httpd.server_address[0], "127.0.0.1")
+        finally:
+            httpd.server_close()
+
+    def test_announce_receives_the_address_that_was_actually_bound(self):
+        """The old message printed the *arguments*, which are None unless the
+        caller passed them, so it reported ``http://None:8791``."""
+        seen = []
+        httpd, _ = serve("127.0.0.1", 0, block=False,
+                         announce=lambda addr: seen.append(addr))
+        try:
+            self.assertEqual(seen, [httpd.server_address[:2]])
+            self.assertIsNotNone(seen[0][0])
+            self.assertNotEqual(seen[0][1], 0)
+        finally:
+            httpd.server_close()
+
+    def test_nothing_is_announced_when_nobody_asked(self):
+        """A library function must not print. ``announce`` is opt-in."""
+        httpd, _ = serve("127.0.0.1", 0, block=False)
+        try:
+            self.assertTrue(httpd.server_address[1])
+        finally:
+            httpd.server_close()
 
 
 if __name__ == "__main__":
