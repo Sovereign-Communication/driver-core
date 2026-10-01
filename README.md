@@ -144,12 +144,78 @@ All three structured tiers are stdlib-only, deliberately:
 The DOM target is **not** substituted into the URL. A declared URL is safer
 and more auditable than splicing a caller string into one.
 
+### Declaring a source
+
+The tiers are useless unless something registers them, so the shipped CLI and
+service read them out of the same `DRIVER_*` namespace as everything else:
+
+| Setting | Tier it enables |
+|---|---|
+| `DRIVER_CLI_COMMAND` | `cli` — a command, tokenised and run |
+| `DRIVER_MCP_COMMAND` + `DRIVER_MCP_TOOL` | `mcp` — both, or neither |
+| `DRIVER_DOM_URL` | `dom` |
+| `DRIVER_SCREEN` | `screen` — the vision tier, and the only thing that spends |
+
+```bash
+$ DRIVER_CLI_COMMAND='python -c "import sys; print(sys.argv[1])"' \
+      driver-core --json step --schema cli "my-app"
+{
+  "agreement": {"outcome": "agreed", "asked": 2, "answering": 2, ...},
+  "capture": {"detail": "", "fingerprint": "c3cd13068bb7c667", "ok": true,
+              "source": "cli", "target": "my-app"},
+  "detail": "decision status 'unkeyed': no decision key configured",
+  "ok": false,
+  "reason": "decision_not_usable",
+  "receipt": {"schema": "driver-core-cli@1.0.0", "extraction_id": "d9f55b19ec13", ...},
+  "step_id": "d9f55b19ec13",
+  "stopped_at": "decision",
+  ...                                   # cost_usd, decision, execution
+}
+```
+
+A real child process ran, both free extractors read it, the tally was
+unanimous, and the step stopped at the decision tier because no key is
+configured — which is the whole pipeline behaving correctly on a machine
+without credentials. Nothing off the capture appears anywhere in that
+response, and `driver-core verify` re-hashes the chain afterwards.
+
+Ask for a tier that is not configured and it says so rather than
+substituting another one:
+
+```bash
+$ driver-core step --schema gui "my-app"
+[refused] no_capture: target 'my-app' is declared 'gui' and no configured
+source serves that class; nothing was tried. Configured sources: ['none'].
+```
+
+Two rules make this safe to expose as configuration at all:
+
+- **A tier is off unless it was named.** Nothing is inferred from another
+  setting's presence — in particular, no other setting enables pixels, and
+  `health` reports the sources the driver can actually observe rather than
+  leaving you to infer it from a `no_capture`. With nothing declared the
+  driver observes nothing and says so; it never quietly falls back to a
+  screenshot.
+- **A declared command is tokenised, never shelled.** `shlex` splits it and
+  nothing else happens: no globbing, no `$VAR`, no `|`. A configuration
+  string must not be able to become code — that is the one rule
+  `driver_core.osal` exists to enforce, and a redirect written into
+  `DRIVER_CLI_COMMAND` is a filename argument rather than a redirection.
+
+A `dom` target is validated against its own schema (`window_title`, plus
+optional `visible_text`) rather than the screen schema, because a document
+cannot honestly report which application is in the foreground or whether an
+error dialog is up. Inventing either would be a guess presented as an
+observation.
+
 ## Guarantees
 
 | | |
 |---|---|
 | **A disagreement never reaches the model** | enforced in the pipeline; the test asserts the fake decision client was never called |
 | **Three of four targets never see pixels** | declared per target class; a screen source is not a candidate for `cli`, `mcp` or `dom` |
+| **A tier is off unless it was named** | no setting enables another; the vision tier has its own switch, and `health` reports the sources the driver can observe |
+| **An absent or unknown `schema` is refused** | 400, not a default — the old default left the class undeclared, which permits pixels last, so the strongest tier was reachable by forgetting a field |
 | **Screen content never comes back out** | a sentinel test greps the audit chain, votes and receipt; a one-line leak fails it |
 | **Unanswered ≠ agreeing** | three distinct outcomes: `agreed`, `disagreed`, `insufficient` |
 | **Spend is refused before dispatch** | reserve → dispatch once → settle once; a call whose usage is unreadable is charged at the full estimate, never zero |
@@ -235,9 +301,21 @@ pip install driver-core          # zero dependencies, stdlib only
 ```bash
 driver-core health                       # settings, budget, audit state
 driver-core vocabulary                   # the closed action set
+driver-core schema                       # the declared extraction schemas
 driver-core --dry-run step "my-app"      # rehearse a step; no side effects
 driver-core verify                       # re-hash the audit chain
 driver-core serve --print-token          # loopback REST surface
+```
+
+A step needs to know *what kind* of thing it is observing, and that is
+explicit on both surfaces — `--schema` on the CLI (default `gui`) and a
+required `schema` in the body of `POST /step`. It is not cosmetic: the class
+decides which sources may answer, and an undeclared class permits any of
+them, pixels last.
+
+```bash
+DRIVER_CLI_COMMAND='python -c "import sys; print(sys.argv[1])"' \
+    driver-core step --schema cli "my-app"
 ```
 
 Consent on the command line names one action and its parameters, and echoes
@@ -256,10 +334,13 @@ mutating action; under the current law it would authorise nothing at all, and
 a flag that quietly does nothing is worse than no flag.
 
 ```python
-from driver_core import Driver, Consent
+from driver_core.driver import Driver
+from driver_core.perception import CLI, Target
+from driver_core.states import CLI_SCHEMA
 
 driver = Driver()                       # budget, audit and executors injected
-result = driver.step("my-app")
+                                       # sources come from DRIVER_*, as declared
+result = driver.step(Target("my-app", CLI), schema=CLI_SCHEMA)
 
 if result.ok:
     print(result.execution.action, result.decision.confidence)
@@ -267,6 +348,12 @@ else:
     # A refusal is a normal, successful outcome -- the system working.
     print(result.reason, result.detail)
 ```
+
+A default `Driver()` observes nothing, because no setting declares a source.
+That is deliberate: it refuses with `no_capture` and tells you what *is*
+configured, rather than reaching for pixels on your behalf. Pass
+`sources=(...)` to register your own in Python instead — `()` means
+"explicitly none".
 
 ## Configuration
 
@@ -286,18 +373,40 @@ in flight, and it must never read another project's keys or state.
 | `DRIVER_DRY_RUN` | `false` | rehearse without side effects |
 | `DRIVER_ALLOW_WRITE` | `false` | register the executors that have side effects |
 | `DRIVER_AUDIT_PATH` | OS state dir | the hash-chained log |
+| `DRIVER_CLI_COMMAND` | — | declare the `cli` tier; tokenised, never shelled |
+| `DRIVER_MCP_COMMAND` | — | declare the `mcp` tier (needs `DRIVER_MCP_TOOL` too) |
+| `DRIVER_MCP_TOOL` | — | the tool to call; half a declaration enables nothing |
+| `DRIVER_DOM_URL` | — | declare the `dom` tier |
+| `DRIVER_SCREEN` | `false` | declare the vision tier; the only source that costs money |
+
+The bottom five are the declared perception sources. Each is off unless set,
+`health` reports which are live, and none of them is inferred from another's
+presence. See [Declaring a source](#declaring-a-source).
 
 ## Integrating into a host project
 
 The REST surface is the seam, and it is deliberately plain:
 
 ```
-GET  /health      settings, key state, vocabulary
+GET  /health      settings, key state, vocabulary, and which sources are live
 GET  /vocabulary  the declared actions
 GET  /schemas     the declared extraction schemas
 GET  /verify      audit chain verdict + spend
-POST /step        {"target": "...", "prefer": ["cli"], "consent": {...}}
+POST /step        {"target": "...", "schema": "cli", "prefer": ["cli"],
+                  "consent": {...}, "step_id": "..."}
 ```
+
+`schema` is **required**. It binds the target to one declared class, and
+anything absent, blank or unrecognised is a 400 naming the valid names. That
+is not pedantry: the class is what makes "three of four targets never see
+pixels" enforceable, and the old behaviour — defaulting to the screen schema
+while leaving the class undeclared — meant the one request a caller made
+without thinking was the one that could reach both the strongest structured
+tier and pixels. There is no safe default, so the service asks.
+
+`step_id` is optional and is used as given, so a host can join its own log to
+the audit chain afterwards. Nothing else off a screen crosses the boundary in
+either direction.
 
 Three conventions a host can rely on:
 
@@ -341,12 +450,19 @@ pointing this at a real machine:
 ## Development
 
 ```bash
-python -m unittest discover -s tests -t .    # 246 hermetic tests
-ruff check driver_core tests
+python -m unittest discover -s tests -t .    # 283 hermetic tests
+ruff check driver_core tests tools
 python tools/tier_order_run.py               # the tier chain, live
 python tools/live_action_run.py              # a declared action, live
 python tools/vision_run.py                   # the vision tier (needs a key)
+python tools/configure_run.py                # declared settings -> live sources
 ```
+
+`tools/configure_run.py` drives the shipped CLI and the REST service over a
+real socket with nothing but `DRIVER_*` variables set: a real child process
+observed through `step --schema cli`, a real document fetched for `--schema
+dom`, a `>` in a declared command that is *not* a redirection, and an absent
+`schema` refused with a 400 rather than defaulted.
 
 `tools/vision_run.py` uses `DRIVER_JEV_API_KEY` and the real endpoint when a
 key is configured, and **reports that the live call was skipped when one is

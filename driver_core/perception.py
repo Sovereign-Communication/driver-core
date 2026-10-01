@@ -596,6 +596,13 @@ def select_capture(target, sources, *, prefer=()):
     whether the screen tier was *excluded by class* or merely declined. Those
     are different operational problems: the first means the caller declared
     the wrong class, and the second means the machine genuinely had nothing.
+
+    The three refusals below are distinguished by that distinction rather
+    than by tone. A declared target with no candidate at all had *nothing
+    tried*, which is a different fact from "everything declined" and reports
+    itself as such -- because an operator who configured a CLI source and
+    asked for pixels has a wiring mistake, not an observation failure, and
+    the message has to say which.
     """
     target = as_target(target)
     candidates = [s for s in sources if s.can_serve(target)]
@@ -624,6 +631,25 @@ def select_capture(target, sources, *, prefer=()):
             return capture
 
     attempted = ", ".join(f"{name}: {detail}" for name, detail in tried) or "none"
+    declared_on = sorted({s.name for s in sources}) or ["none"]
+
+    if target.declared and not candidates:
+        # Nothing was even tried, because every configured source serves some
+        # other class. "Every source declined" would be a lie about what
+        # happened and would send an operator to inspect the wrong tier; the
+        # fix is to configure the class they actually asked for.
+        note = ""
+        if excluded:
+            note = (f"; excluded because they serve another class: "
+                    f"{sorted(set(excluded))}")
+        if "screen" in excluded:
+            note += (f" The screen tier serves {VISION_CLASS!r} only, so it was "
+                     f"therefore not reached.")
+        raise PerceptionUnavailable(
+            f"target {target.ref!r} is declared {target.target_class!r} and no "
+            f"configured source serves that class; nothing was tried. "
+            f"Configured sources: {declared_on}{note}.")
+
     if target.declared and target.structured and "screen" in excluded:
         # The loud, correct version: pixels were not merely unhelpful here,
         # they were unreachable. Saying so is what turns a confusing stop
@@ -632,8 +658,9 @@ def select_capture(target, sources, *, prefer=()):
         raise PerceptionUnavailable(
             f"target {target.ref!r} is declared {target.target_class!r}, which "
             f"is answerable without pixels; the screen tier was therefore not "
-            f"reached. Tried: {attempted}. No source serves "
-            f"{target.target_class!r} with an answer.")
+            f"reached. Tried: {attempted}. Configured sources: {declared_on}.")
+
     raise PerceptionUnavailable(
         f"no source could observe the target {target.ref!r}; every source "
-        f"either declined or failed. Tried: {attempted}")
+        f"either declined or failed. Tried: {attempted}. Configured "
+        f"sources: {declared_on}")

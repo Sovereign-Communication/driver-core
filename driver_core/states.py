@@ -94,15 +94,56 @@ SCHEMAS_BY_TARGET = {
     "mcp": CLI_SCHEMA,
 }
 
+#: What a fetched document can honestly supply. Separate from
+#: :data:`SCREEN_SCHEMA` because a document genuinely cannot report the
+#: foreground application's name or whether a modal dialog is up -- and
+#: reusing the screen schema for it would mean asking a reader to invent two
+#: of its three required fields, which is the failure this project is built
+#: against. A DOM target that cannot read a title reports a shortfall, which
+#: is the truth, rather than a confident guess.
+DOM_SCHEMA = Schema(
+    "driver-core-dom", "1.0.0",
+    [
+        Field("window_title", "string", presence=REQUIRED, provenance=CASED,
+              description="The document's <title>."),
+        Field("visible_text", "string", presence=OPTIONAL, provenance=CASED,
+              description="Readable text of the document body.",
+              provenance_note="Casefolded and stripped; long free text is the "
+                              "field most likely to produce a genuine "
+                              "disagreement, and that is reported rather "
+                              "than resolved."),
+    ],
+)
+
 #: Which schema serves each declared target class. Declared next to the
 #: schemas rather than guessed in the driver, because "a DOM target and a GUI
-#: target extract the same fields" is a real statement about the product and
+#: target extract different fields" is a real statement about the product and
 #: belongs in the module that owns the declarations.
 SCHEMA_BY_CLASS = {
     CLI: CLI_SCHEMA,
     MCP: CLI_SCHEMA,
-    DOM: SCREEN_SCHEMA,
+    DOM: DOM_SCHEMA,
     GUI: SCREEN_SCHEMA,
+}
+
+#: The names the service accepts on the wire, each bound to a target class
+#: **and** its schema in one place.
+#:
+#: Two parallel maps over the same string domain is how a request ends up
+#: with the screen schema and an undeclared class -- and an undeclared class
+#: permits any source, which quietly reopens the vision tier. Binding them
+#: together means a name is either known completely or refused.
+#:
+#: The table is the whole set: there is deliberately no default for an absent
+#: name. A default would have to be one of the four declared classes, and
+#: whichever it was would silently observe a different machine than the
+#: caller asked for -- or spend money. So the service asks instead.
+WIRE_TARGETS = {
+    "cli": (CLI, CLI_SCHEMA),
+    "mcp": (MCP, CLI_SCHEMA),
+    "dom": (DOM, DOM_SCHEMA),
+    "gui": (GUI, SCREEN_SCHEMA),
+    "screen": (GUI, SCREEN_SCHEMA),
 }
 
 #: Which target classes are answerable without a vision extractor.

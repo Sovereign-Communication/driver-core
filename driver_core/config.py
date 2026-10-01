@@ -108,6 +108,17 @@ class Settings:
     audit_path: str = ""
     dry_run: bool = False
     allow_write: bool = False
+    #: Declared perception sources. Each is off unless the operator sets it,
+    #: so the default driver observes nothing rather than guessing at what to
+    #: observe. None of these is a secret and all appear in ``redacted()``.
+    cli_command: str = ""
+    mcp_command: str = ""
+    mcp_tool: str = ""
+    dom_url: str = ""
+    #: The vision tier is opt-in. It is the only source that costs money and
+    #: the only one that cannot be re-derived from a structured input, so it
+    #: is never enabled by the presence of another setting.
+    screen_enabled: bool = False
 
     def __post_init__(self):
         if not self.base_url.startswith(("http://", "https://")):
@@ -154,11 +165,27 @@ class Settings:
             "confidence_threshold": self.confidence_threshold,
             "dry_run": self.dry_run,
             "allow_write": self.allow_write,
+            "sources": self.declared_sources(),
         }
         return data
 
     def with_overrides(self, **kwargs):
         return replace(self, **kwargs)
+
+    def declared_sources(self):
+        """Which perception sources this configuration enables, by name.
+
+        Reported by ``/health`` so an operator can see what the driver is
+        actually able to observe without reading a source list out of a
+        running process. Order is the declared tier order, not the order the
+        settings happen to be written in.
+        """
+        from .perception import SOURCE_ORDER
+        enabled = {"cli": bool(self.cli_command),
+                   "mcp": bool(self.mcp_command and self.mcp_tool),
+                   "dom": bool(self.dom_url),
+                   "screen": bool(self.screen_enabled)}
+        return [name for name in SOURCE_ORDER if enabled[name]]
 
 
 def load_settings(env=None, **overrides):
@@ -188,6 +215,11 @@ def load_settings(env=None, **overrides):
         audit_path=env.get(ENV_PREFIX + "AUDIT_PATH", ""),
         dry_run=_env_bool(env, "DRY_RUN", False),
         allow_write=_env_bool(env, "ALLOW_WRITE", False),
+        cli_command=env.get(ENV_PREFIX + "CLI_COMMAND", ""),
+        mcp_command=env.get(ENV_PREFIX + "MCP_COMMAND", ""),
+        mcp_tool=env.get(ENV_PREFIX + "MCP_TOOL", ""),
+        dom_url=env.get(ENV_PREFIX + "DOM_URL", ""),
+        screen_enabled=_env_bool(env, "SCREEN", False),
     )
     return settings.with_overrides(**overrides) if overrides else settings
 
