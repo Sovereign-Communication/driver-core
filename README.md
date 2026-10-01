@@ -224,6 +224,7 @@ observation.
 | **Responses never carry screen content** | captures are summarised by fingerprint; the agreed value is opt-in, not the default |
 | **Every step is auditable** | hash-chained log; `verify` re-hashes the chain and says so out loud |
 | **OS contact lives in one module** | an AST scan fails the build if anything else imports `subprocess` or probes `os.name`/`sys.platform` |
+| **One concern per module in the perception tier** | `chain` (order, refusals), `adapters` (one way to read a system), `parsing` (JSON-RPC, HTML), `observation` (the vocabulary); an import-graph scan fails the build if an adapter can see the order or a parser learns about a source |
 
 ## Consent, precisely
 
@@ -462,7 +463,7 @@ Before pointing this at a real machine:
 ## Development
 
 ```bash
-python -m unittest discover -s tests -t .    # 295 hermetic tests
+python -m unittest discover -s tests -t .    # 299 hermetic tests
 ruff check driver_core tests tools
 python tools/tier_order_run.py               # the tier chain, live
 python tools/live_action_run.py              # a declared action, live
