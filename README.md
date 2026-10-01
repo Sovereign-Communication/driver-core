@@ -235,7 +235,7 @@ observation.
 | **Irreversible actions need exact consent, once** | bound to the action *and* its resolved parameters, and spent by the use it authorised |
 | **Responses never carry screen content** | captures are summarised by fingerprint; the agreed value is opt-in, not the default |
 | **Every step is auditable** | hash-chained log; `verify` re-hashes the chain and says so out loud |
-| **The log's vocabulary has one owner** | producers import `audit.KIND_*`; no module writes a record kind as a string, and no constant names a record nothing produces |
+| **The log's vocabulary has one owner** | only `audit` declares a `KIND_*`; a whole-package AST scan fails the build if any module writes a record kind as a string, or a name is declared that nothing produces |
 | **Existing logs keep verifying** | `tests/test_audit_compat.py` re-hashes a recorded chain and compares a full run byte for byte |
 | **OS contact lives in one module** | an AST scan fails the build if anything else imports `subprocess` or probes `os.name`/`sys.platform` |
 | **One concern per module in the perception tier** | `chain` (order, refusals), `adapters` (one way to read a system), `parsing` (JSON-RPC, HTML), `observation` (the vocabulary); an import-graph scan fails the build if an adapter can see the order or a parser learns about a source |
@@ -503,7 +503,7 @@ Before pointing this at a real machine:
 ## Development
 
 ```bash
-python -m unittest discover -s tests -t .    # 350 hermetic tests
+python -m unittest discover -s tests -t .    # 348 hermetic tests
 ruff check driver_core tests tools
 python tools/tier_order_run.py               # the tier chain, live
 python tools/live_action_run.py              # a declared action, live

@@ -1,37 +1,37 @@
 """The audit chain is a compatibility surface, and this is the test for it.
 
-An audit log is the one artifact whose whole value is that a record means one
-thing and cannot be quietly reinterpreted later. A refactor that renames a
-record kind, adds a field, or changes the order records are written in makes
-every log already on disk mean something subtly different -- and unlike a
-response shape, nobody is watching for it.
+An audit log is the one artifact whose value is that a record means one thing
+and cannot be quietly reinterpreted later. Two claims are checked, and they
+are different claims:
 
-Two claims are checked, and they are different claims:
-
-* **An existing log still verifies.** ``tests/data/audit_v1.jsonl`` is a real
-  chain, written by the code as it stood before the record-kind vocabulary was
-  given an owner. It must re-hash clean under the current code.
-* **The same run still writes the same bytes.** The scenario below pins the
-  clock and every ``step_id``, so the records it produces are a pure function
-  of the code. They are compared against a golden recorded at the same moment
-  as the fixture.
+* **An existing log still verifies.** ``GOLDEN_CHAIN`` below is a real chain,
+  recorded before the record-kind vocabulary was given an owner. It must
+  re-hash clean under the current code.
+* **The same run still writes the same bytes.** The scenario pins the clock
+  and every ``step_id``, so what it produces is a pure function of the code,
+  and it is compared against that same chain.
 
 The second is the stronger claim and the one that catches a renamed constant.
 A log can verify perfectly while meaning something new.
+
+The chain is inline rather than a ``.jsonl`` file on purpose: ``.gitignore``
+refuses ``*.jsonl`` because an audit log is evidence about a machine and must
+never be committed, and carrying it here also puts any change to it in the
+diff beside the test that explains it. Regenerate with
+``python -m tests.test_audit_compat --emit``.
 """
 import ast
+import importlib
 import json
 import os
+import pathlib
 import tempfile
 import unittest
 from unittest import mock
 
 import driver_core.audit as audit_module
 from driver_core.actions import DEFAULT_VOCABULARY
-from driver_core.audit import (
-    KIND_ACTION, KIND_CAPTURE, KIND_DECISION, KIND_ESCALATION, KIND_EXTRACTION,
-    KIND_REFUSAL, AuditLog,
-)
+from driver_core.audit import AuditLog
 from driver_core.budget import Budget
 from driver_core.config import load_settings
 from driver_core.driver import Driver
@@ -41,25 +41,8 @@ from driver_core.jev_client import JevClient
 from driver_core.perception import CLI, StructuredSource, Target
 from driver_core.states import CLI_SCHEMA
 
-
-#: Every kind the driver can actually produce. If this and the fixture
-#: disagree, one of them is lying, and the test comparing them notices.
-LIVE_KINDS = (KIND_CAPTURE, KIND_EXTRACTION, KIND_DECISION, KIND_ESCALATION,
-              KIND_REFUSAL, KIND_ACTION)
-
-#: The modules that write records. Read as source, because the claim is about
-#: literals surviving in code rather than about a call graph.
-#: A chain recorded by the code as it stood **before** the record-kind
-#: vocabulary was given an owner. It is inline rather than a data file on
-#: purpose: ``.gitignore`` refuses ``*.jsonl`` because an audit log is
-#: evidence about a machine and must never be committed, and weakening
-#: that rule -- or renaming the file to dodge it -- would be worse than
-#: carrying the records here. It also means a change to the chain shows
-#: up in the diff beside the test that explains it.
-#:
-#: One JSON object per line, exactly as the log stores them, wrapped to
-#: stay inside the line length. Regenerate with
-#: ``python tests/test_audit_compat.py --write-golden``.
+#: One JSON object per line, exactly as the log stores them, wrapped to stay
+#: inside the line length.
 GOLDEN_CHAIN = (
     (
      "{\"at\":\"2026-01-01T00:00:00.000000+00:00\",\"detail\":\"target 'unobser"
@@ -168,9 +151,6 @@ GOLDEN_CHAIN = (
      "p000000003\"}"
     ),
 )
-
-PRODUCERS = ("driver", "executor", "extractors", "jev_client")
-
 FIXED_NOW = "2026-01-01T00:00:00.000000+00:00"
 
 
@@ -204,7 +184,7 @@ def _driver(workdir, responses, *, blind=False):
 
     :class:`~driver_core.ev.FakeJev` would be shorter, but it writes no
     ``decision`` record at all -- it is not the client that ships. Using the
-    real one is what puts the fifth record kind in the fixture.
+    real one is what puts the fifth record kind in the recorded chain.
     """
     settings = load_settings(
         env={}, jev_api_key="k",
@@ -267,33 +247,19 @@ def golden_records():
     return [json.loads(record) for record in GOLDEN_CHAIN]
 
 
-def _folded(records, workdir=None):
-    """Records with any machine-specific prefix replaced by a marker.
-
-    The scenario is built to contain no such prefix -- see
-    :func:`run_scenario` -- so this folds nothing today. It is here so that a
-    future scenario which does acquire one fails with a readable diff rather
-    than with a hash mismatch, and so the portability of the golden is
-    checked rather than assumed.
-    """
-    out = json.loads(json.dumps(records))
-    blob = json.dumps(out)
-    for root in filter(None, (workdir, tempfile.gettempdir(),
-                              os.path.expanduser("~"))):
-        marker = json.dumps(root)[1:-1]
-        if marker and marker in blob:
-            blob = blob.replace(marker, "<root>")
-    return json.loads(blob)
-
-
 class ChainCompatibilityTests(unittest.TestCase):
+    """The two compatibility claims, and the two guards on the vocabulary."""
 
-    def _verify_round_trip(self):
-        """Verify the recorded chain the way a host does: read from a file.
+    def _declared_kinds(self):
+        return {value for name, value in vars(audit_module).items()
+                if name.startswith("KIND_")}
 
-        The golden is a literal in this module, so writing it out and
-        re-reading it is what makes the test a claim about *logs on disk*
-        rather than about a list in memory.
+    def _verify_recorded_chain(self):
+        """Verify the recorded chain the way a host does: read it from a file.
+
+        The chain is a literal in this module, so writing it out and reading
+        it back is what makes the claim about *logs on disk* rather than about
+        a list in memory.
         """
         with tempfile.TemporaryDirectory() as workdir:
             path = os.path.join(workdir, "audit.jsonl")
@@ -302,142 +268,127 @@ class ChainCompatibilityTests(unittest.TestCase):
                     handle.write(record + "\n")
             return AuditLog(path).verify()
 
-    def test_a_log_written_before_this_change_still_verifies(self):
-        """The compatibility claim in its plainest form."""
-        verdict = self._verify_round_trip()
-        self.assertTrue(verdict.ok,
-                        f"an existing log stopped verifying: {verdict}")
+    def _run_once(self):
+        with tempfile.TemporaryDirectory() as workdir:
+            with mock.patch("driver_core.audit._now", return_value=FIXED_NOW):
+                return run_scenario(workdir).read_all()
 
-    def test_the_fixture_covers_every_kind_the_driver_can_produce(self):
-        kinds = [r["kind"] for r in golden_records()]
-        self.assertEqual(set(kinds), set(LIVE_KINDS))
+    def test_a_log_written_before_this_change_still_verifies(self):
+        verdict = self._verify_recorded_chain()
+        self.assertTrue(
+            verdict.ok, f"an existing log stopped verifying: {verdict}")
+
+    def test_the_recorded_chain_covers_every_declared_kind(self):
+        kinds = {record["kind"] for record in golden_records()}
+        self.assertEqual(kinds, self._declared_kinds())
 
     def test_the_same_run_writes_the_same_bytes(self):
         """Stronger than verification: identical records, not a valid chain.
 
-        Every machine-specific prefix is folded to a marker first, so the
-        comparison is about what the code *decides to record* rather than
-        about where the temporary directory happened to land.
+        Run twice so the comparison cannot pass by luck -- one run agreeing
+        with the chain says nothing about the next one doing the same.
         """
-        with tempfile.TemporaryDirectory() as workdir:
-            with mock.patch("driver_core.audit._now", return_value=FIXED_NOW):
-                produced = _folded(run_scenario(workdir).read_all(), workdir)
-        self.assertEqual(produced, _folded(golden_records()))
+        for attempt in range(2):
+            with self.subTest(run=attempt):
+                self.assertEqual(self._run_once(), golden_records())
 
-    def test_the_records_are_actually_deterministic(self):
-        """Without this, the test above could pass by comparing nothing."""
-        runs = []
-        for _ in range(2):
-            with tempfile.TemporaryDirectory() as workdir:
-                with mock.patch("driver_core.audit._now",
-                                return_value=FIXED_NOW):
-                    records = run_scenario(workdir).read_all()
-                runs.append(_folded(records, workdir))
-        self.assertGreater(len(runs[0]), 5)
-        self.assertEqual(runs[0], runs[1])
+    def test_no_record_kind_is_written_as_a_string(self):
+        """A record kind is a declared name, never a literal, wherever it is
+        written -- in a module nobody listed, or through an alias.
 
-    def test_no_declared_kind_names_a_record_nothing_produces(self):
-        declared = {name: value for name, value in vars(audit_module).items()
-                    if name.startswith("KIND_")}
-        self.assertEqual(
-            sorted(declared.values()), sorted(set(LIVE_KINDS)),
-            "a declared kind names a record nothing produces, or a produced "
-            "record has no declared name")
+        The scan covers the whole package and keys on the *shape* of the call
+        rather than the name of its receiver, so neither a new producer nor a
+        local ``log = self.audit`` can smuggle a string past it.
 
-    def test_every_record_is_appended_by_a_declared_name(self):
-        """The other direction: a record written without a constant is a claim
-        the log makes that nothing owns.
-
-        Checked on the call sites rather than by searching for the strings.
-        ``"capture"`` is also a ``__slots__`` entry, a key in ``to_dict`` and a
-        tier name in ``stopped_at``, and none of those is a record kind -- a
-        text search cannot tell them apart.
+        The rule is that a string literal may only be appended when the call
+        passes nothing by keyword: a record always carries fields, and the
+        three places that append bare strings -- the problem messages in
+        ``jev_client`` -- never do.
         """
-        import importlib
-        kinds = {name for name in dir(audit_module)
-                 if name.startswith("KIND_")}
-        found = []
-        for module_name in PRODUCERS:
-            path = importlib.import_module(
-                f"driver_core.{module_name}").__file__
-            with open(path, encoding="utf-8") as handle:
-                source = handle.read()
-            for node in ast.walk(ast.parse(source)):
-                if not isinstance(node, ast.Call):
-                    continue
-                func = node.func
-                if not (isinstance(func, ast.Attribute)
-                        and func.attr == "append" and node.args):
-                    continue
-                receiver = func.value
-                owner = (receiver.attr if isinstance(receiver, ast.Attribute)
-                         else getattr(receiver, "id", None))
-                if owner != "audit":
-                    continue
+        offenders = []
+        for path, tree in _package():
+            for node in _appends(tree):
                 first = node.args[0]
-                found.append(
-                    f"driver_core/{module_name}.py:{node.lineno} "
-                    + (f"appends the literal {first.value!r}"
-                       if isinstance(first, ast.Constant)
-                       else f"appends {ast.unparse(first)}"))
-                if isinstance(first, ast.Name):
-                    self.assertIn(first.id, kinds)
-        self.assertEqual([f for f in found if "literal" in f], [],
-                         "a record kind written as a bare string")
+                if (isinstance(first, ast.Constant) and isinstance(first.value, str)
+                        and node.keywords):
+                    offenders.append(
+                        f"{path.name}:{node.lineno} appends the literal "
+                        f"{first.value!r}")
+        self.assertEqual(offenders, [], "\n".join(offenders))
 
-    def test_every_declared_kind_is_produced_by_the_scenario(self):
-        """Ties the declaration to real behaviour, not to a list in a test."""
-        produced = {r["kind"] for r in golden_records()}
-        self.assertEqual(produced, set(LIVE_KINDS))
+    def test_the_vocabulary_is_declared_once_and_every_name_is_written(self):
+        """Both directions of the same claim, and neither needs a list here.
+
+        A declared name nothing writes is a claim about the log that can rot
+        with nothing to notice it. So is a second copy of a name, which is
+        why ``audit`` is the only module allowed to declare one: everyone
+        else imports it. The producers are derived from the code -- every
+        module that appends a ``KIND_*`` name -- so a new one is covered
+        without anyone editing a list.
+        """
+        produced, redeclared = set(), []
+        for path, tree in _package():
+            for node in ast.walk(tree):
+                if (path.stem != "audit" and isinstance(node, ast.Assign)
+                        and any(isinstance(target, ast.Name)
+                                and target.id.startswith("KIND_")
+                                for target in node.targets)):
+                    redeclared.append(f"{path.name}:{node.lineno}")
+            names = {node.args[0].id for node in _appends(tree)
+                     if isinstance(node.args[0], ast.Name)
+                     and node.args[0].id.startswith("KIND_")}
+            if not names:
+                continue
+            module = importlib.import_module(
+                "driver_core" if path.stem == "__init__"
+                else f"driver_core.{path.stem}")
+            produced.update(getattr(module, name) for name in names)
+        self.assertEqual(
+            redeclared, [], f"a KIND_* declared outside audit.py: {redeclared}")
+        self.assertEqual(produced, self._declared_kinds())
 
 
-def _emit_golden_literal(records, width=66):
-    """The recorded chain as a wrapped Python literal, for pasting back in.
+def _package():
+    """Every module in the package, parsed once, for the two scans above."""
+    root = pathlib.Path(audit_module.__file__).parent
+    for path in sorted(root.glob("*.py")):
+        yield path, ast.parse(path.read_text(encoding="utf-8"))
+
+
+def _appends(tree):
+    """Every ``<anything>.append(<something>, ...)`` call in a parsed module.
+
+    Deliberately ignorant of what is being appended to. Naming the receiver
+    would miss an alias, and listing the modules would miss a new one.
+    """
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "append" and node.args):
+            yield node
+
+
+def _emit(records, width=66):
+    """The chain as wrapped Python literals, for pasting over GOLDEN_CHAIN.
 
     Wrapped because ``ruff`` selects ``E``, so a 700-character record on one
-    line is a lint failure. The split never lands inside a ``\\`` escape, so
-    the fragments concatenate back to exactly the recorded text.
+    line is a lint failure. Dumping each fragment on its own is enough: the
+    escaping is recomputed per fragment, so a split never lands inside one.
     """
-    lines = ["GOLDEN_CHAIN = ("]
     for record in records:
-        text = json.dumps(record, sort_keys=True, ensure_ascii=False,
-                          separators=(",", ":"))
-        fragments, current, escaped = [], "", False
-        for ch in text:
-            current += ch
-            if ch == "\\" and not escaped:
-                escaped = True
-                continue
-            escaped = False
-            if len(current) >= width:
-                fragments.append(current)
-                current = ""
-        if current:
-            fragments.append(current)
-        lines.append("    (")
-        for fragment in fragments:
-            escaped_text = fragment.replace("\\", "\\\\").replace('"', '\\"')
-            lines.append(f'     "{escaped_text}"')
-        lines.append("    ),")
-    lines.append(")")
-    return "\n".join(lines)
+        text = json.dumps(record, sort_keys=True, separators=(",", ":"))
+        print("    (")
+        for start in range(0, len(text), width):
+            print("     " + json.dumps(text[start:start + width]))
+        print("    ),")
 
 
 if __name__ == "__main__":
     import sys
 
-    if "--write-golden" in sys.argv:
+    if "--emit" in sys.argv:
         # Run once, against the code as it stands, to record what the chain
-        # looks like *now*. Never run in CI: a golden regenerated by the code
-        # under test proves nothing.
+        # looks like *now*. Never run in CI: a chain regenerated by the code
+        # under test proves nothing about the code under test.
         with tempfile.TemporaryDirectory() as workdir:
             with mock.patch("driver_core.audit._now", return_value=FIXED_NOW):
-                records = run_scenario(workdir).read_all()
-        kinds = {}
-        for record in records:
-            kinds[record["kind"]] = kinds.get(record["kind"], 0) + 1
-        print(_emit_golden_literal(records))
-        print(f"# {len(records)} records, kinds: {kinds}", file=sys.stderr)
-        raise SystemExit(0)
-
-    unittest.main()
+                _emit(run_scenario(workdir).read_all())
