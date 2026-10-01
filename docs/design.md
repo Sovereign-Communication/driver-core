@@ -219,11 +219,26 @@ may change it, and the ones that used to be stated twice now are not.
 | Whether a request is authorised | `Handler._authorised` | the only place a token is read |
 | Whether a declared token is acceptable | `config.validated_token` | one rule, applied where `DRIVER_TOKEN` is read |
 | Which port and host were bound | `serve`, from `server_address` | not from the arguments it was handed |
+| How a declared command becomes an argv | `wiring.parse_argv` | one rule, no escapes, nothing guessed |
 | Endpoint logic, free of HTTP | `Service` | `Handler` adds transport and nothing else |
 
 Six of these were stated more than once, or crowded together, and each had
 already cost something:
-* **The REST token was checked but could not be held.** `Service` minted one
+
+* **`parse_argv` used POSIX `shlex`, which is a shell, not a tokeniser.**
+  `shlex` reads `\` as an escape outside quotes, so
+  `C:\Python314\python.exe server.py` resolved to
+  `C:Python314python.exe`. The source reported itself configured, and the
+  step failed at run time naming a path the operator never typed — which
+  disables the `cli` and `mcp` tiers with an absolute interpreter path on
+  Windows, the platform this project tests on most. The rule is now total:
+  **whitespace separates, quotes group, and a backslash is never an escape.**
+  There is deliberately no `\"` exception either, because keeping it
+  reproduces the identical bug for a path ending in a separator
+  (`"C:\Users\me\"` loses its last backslash and its closing quote). A rule
+  with no exceptions cannot be misapplied in a way nobody can predict, and
+  the one thing the previous rule could not do — guess — is now a refusal
+  with a message naming the fix.* **The REST token was checked but could not be held.** `Service` minted one
   per process and the only way to read it was a CLI flag that bound the port,
   printed, and exited — so the credential it produced belonged to a process
   that no longer existed. The token is now a declared `DRIVER_TOKEN`, which is

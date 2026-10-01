@@ -14,6 +14,7 @@ Both matter because the alternative is a configuration string becoming code,
 which is the one thing :mod:`driver_core.osal` exists to prevent.
 """
 import os
+import sys
 import unittest
 from unittest import mock
 
@@ -171,7 +172,11 @@ class PoolWiringTests(unittest.TestCase):
 
 
 class CommandParsingTests(unittest.TestCase):
-    """Tokenisation, never a shell."""
+    """Tokenisation, never a shell.
+
+    One rule: **a backslash is never an escape character. There are no
+    escapes.** Quotes group; everything between them is literal.
+    """
 
     def test_a_simple_command_splits_into_argv(self):
         self.assertEqual(parse_argv("python -c print(1)"),
@@ -200,6 +205,175 @@ class CommandParsingTests(unittest.TestCase):
         argv = parse_argv("tool ; rm -rf /")
         self.assertEqual(argv, ["tool", ";", "rm", "-rf", "/"])
         self.assertNotIn("|", argv)
+
+    # -- the Windows path, which is why the rule changed -----------------
+
+    def test_an_unquoted_windows_path_keeps_its_backslashes(self):
+        """The defect that changed this function.
+
+        ``shlex`` in POSIX mode reads ``\\`` as an escape outside quotes, so
+        this resolved to ``C:Python314python.exe`` -- a path nobody typed.
+        The ``cli`` and ``mcp`` tiers were therefore unusable with an
+        absolute interpreter path on the platform this project tests on most.
+
+        Asserted as a literal so it is checked on every cell, not only where
+        such a path happens to exist.
+        """
+        self.assertEqual(
+            parse_argv("C:\\Python314\\python.exe server.py"),
+            ["C:\\Python314\\python.exe", "server.py"])
+
+    def test_a_windows_path_argument_keeps_its_backslashes(self):
+        self.assertEqual(parse_argv("tool --path C:\\data\\out.txt --flag"),
+                         ["tool", "--path", "C:\\data\\out.txt", "--flag"])
+
+    def test_this_interpreter_round_trips_through_the_tokeniser(self):
+        """The real case, in the form an operator actually writes it.
+
+        On Windows ``sys.executable`` contains backslashes, so this fails on
+        the old tokenizer and passes on the new one -- which is why the
+        ``windows-latest`` cells are the ones that matter for it. Elsewhere
+        it is a plain no-op that keeps the suite honest on all platforms.
+        """
+        self.assertEqual(parse_argv(sys.executable), [sys.executable])
+        self.assertEqual(parse_argv(sys.executable + " -V")[0], sys.executable)
+
+    def test_a_quoted_windows_path_still_works_exactly_as_before(self):
+        """The one form that already worked, and must not change."""
+        self.assertEqual(
+            parse_argv('"C:\\Program Files\\Python\\python.exe" -m srv'),
+            ["C:\\Program Files\\Python\\python.exe", "-m", "srv"])
+
+    def test_a_quoted_path_ending_in_a_separator_keeps_it(self):
+        """``"C:\\Users\\me\\"`` -- a path ending in a backslash.
+
+        The old tokenizer treated ``\\"`` inside double quotes as an escaped
+        quote, so it swallowed the closing quote and lost the separator. Any
+        rule that keeps ``\\"`` as an escape reproduces exactly this bug,
+        which is why there are no escapes at all.
+        """
+        self.assertEqual(parse_argv('"C:\\Users\\me\\"'), ["C:\\Users\\me\\"])
+
+    def test_no_escape_sequence_is_processed_anywhere(self):
+        """A backslash is a backslash, before or inside quotes.
+
+        Before this, ``\\P`` became ``P`` and ``\\s`` became ``s``, which is
+        how a path turned into a different string without anybody asking.
+        """
+        self.assertEqual(parse_argv('tool "a\\Pb\\sc"'),
+                         ["tool", "a\\Pb\\sc"])
+        self.assertEqual(parse_argv("tool a\\Pb\\sc"),
+                         ["tool", "a\\Pb\\sc"])
+
+    def test_single_quotes_group_too(self):
+        self.assertEqual(parse_argv("tool 'two words'"),
+                         ["tool", "two words"])
+
+    def test_an_empty_quoted_argument_is_preserved(self):
+        self.assertEqual(parse_argv('tool "" --flag'), ["tool", "", "--flag"])
+
+    def test_an_unterminated_quote_names_the_fix_rather_than_guessing(self):
+        """Closing it would be a guess, and a wrong guess here is a source
+        that looks configured and then fails at run time.
+
+        The realistic cause is a path quoted at one end only, which is what
+        somebody types when they quote the half of the path they think is
+        ambiguous.
+        """
+        with self.assertRaises(ConfigError) as ctx:
+            parse_argv('"C:\\Program Files\\py\\python.exe -m srv')
+        message = str(ctx.exception)
+        self.assertIn("unterminated", message)
+        self.assertIn("quote", message)
+        # It has to say what to do, not merely that it could not do it.
+        self.assertIn("space", message)
+        self.assertIn("C:\\path with spaces", message)
+
+    def test_an_unquoted_space_splits_and_is_not_refused(self):
+        """A deliberate decision, pinned so it cannot drift by accident.
+
+        ``C:\\Program Files\\py\\python.exe`` is two tokens under a rule where
+        whitespace separates and quotes group. Refusing it would mean
+        guessing at the operator's intent; splitting it is what the rule says.
+        What makes that survivable is that the resulting ``not found`` names
+        the split argv -- see LaunchDiagnosticTests.
+        """
+        self.assertEqual(parse_argv("C:\\Program Files\\py\\python.exe"),
+                         ["C:\\Program", "Files\\py\\python.exe"])
+
+    def test_a_single_quote_is_refused_the_same_way(self):
+        with self.assertRaises(ConfigError) as ctx:
+            parse_argv("tool 'oops")
+        self.assertIn("unterminated", str(ctx.exception))
+
+
+class LaunchDiagnosticTests(unittest.TestCase):
+    """What a host is told when a declared command will not start.
+
+    The message is the only clue a host gets: the source is configured, the
+    step runs, and the failure arrives as a string. So it has to contain
+    enough to act on.
+    """
+
+    def cli_detail(self, declared):
+        source = configured_sources(
+            load_settings(env={"DRIVER_CLI_COMMAND": declared}))[0]
+        return source.capture(Target("my-app")).detail
+
+    def mcp_detail(self, declared):
+        source = configured_sources(load_settings(
+            env={"DRIVER_MCP_COMMAND": declared,
+                 "DRIVER_MCP_TOOL": "t"}))[0]
+        return source.capture(Target("my-app")).detail
+
+    def test_the_message_shows_the_argv_that_was_actually_attempted(self):
+        detail = self.cli_detail("definitely-not-a-real-binary-xyz --flag")
+        self.assertIn("not found", detail)
+        self.assertIn("-- attempted", detail)
+        self.assertIn("definitely-not-a-real-binary-xyz", detail)
+
+    def test_a_split_path_is_visible_in_the_message(self):
+        """An unquoted path containing a space is split, and the operator
+        wrote one path. Echoing the argv is what turns that into a
+        diagnosis: ``C:\\Program`` on its own is the tell.
+
+        The message embeds a ``repr``, so backslashes appear doubled; the
+        assertions read it with that escaping undone.
+        """
+        detail = self.cli_detail("C:\\Program Files\\Py\\python.exe")
+        flat = detail.replace("\\\\", "\\")
+        self.assertIn("C:\\Program", flat)
+        self.assertIn("Files\\Py\\python.exe", flat)
+        self.assertIn("space", detail)
+
+    def test_the_bare_binary_case_does_not_mention_quoting(self):
+        """A missing plain command is not a quoting problem, and telling the
+        operator to look at their quotes sends them after the wrong thing."""
+        detail = self.cli_detail("definitely-not-a-real-binary-xyz")
+        self.assertNotIn("space", detail)
+
+    def test_the_mcp_tier_gets_the_same_diagnostic(self):
+        detail = self.mcp_detail("C:\\Program Files\\Py\\mcp.exe")
+        self.assertIn("mcp server did not run", detail)
+        self.assertIn("-- attempted", detail)
+        self.assertIn("space", detail)
+
+    def test_a_long_command_is_abbreviated_rather_than_dumped(self):
+        """The detail reaches the audit chain, so an operator who pastes a
+        long command must not turn one refusal into a wall of text."""
+        declared = ("definitely-not-a-real-binary-xyz "
+                    + " ".join(f"a{i}" for i in range(20)))
+        detail = self.cli_detail(declared)
+        self.assertIn("more'", detail)
+        self.assertNotIn("a19", detail)
+
+    def test_a_timeout_is_not_dressed_up_as_a_missing_binary(self):
+        source = configured_sources(
+            load_settings(env={"DRIVER_CLI_COMMAND": "python"}))[0]
+        detail = source.capture(Target("x")).detail
+        # python exists, so this one ran; the assertion is that a *successful*
+        # launch produces no diagnostic at all.
+        self.assertEqual(detail, "")
 
 
 class DomSchemaTests(unittest.TestCase):

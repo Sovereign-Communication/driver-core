@@ -189,11 +189,23 @@ Two rules make this safe to expose as configuration at all:
   leaving you to infer it from a `no_capture`. With nothing declared the
   driver observes nothing and says so; it never quietly falls back to a
   screenshot.
-- **A declared command is tokenised, never shelled.** `shlex` splits it and
-  nothing else happens: no globbing, no `$VAR`, no `|`. A configuration
-  string must not be able to become code — that is the one rule
+- **A declared command is tokenised, never shelled.** Whitespace separates and
+  quotes group; nothing else happens. No globbing, no `$VAR`, no `|`, and
+  **no escapes — a backslash is a backslash, always**. A configuration string
+  must not be able to become code — that is the one rule
   `driver_core.osal` exists to enforce, and a redirect written into
   `DRIVER_CLI_COMMAND` is a filename argument rather than a redirection.
+
+  This is what makes `DRIVER_CLI_COMMAND='C:\Python314\python.exe probe'`
+  work. The previous tokenizer was POSIX `shlex`, which read `\` as an escape
+  and resolved that to `C:Python314python.exe` — a path nobody typed, from a
+  source that still reported itself as configured. The `cli` and `mcp` tiers
+  were unusable with an absolute Windows path.
+
+  Because there are no escapes, **quote any argument containing a space**:
+  `DRIVER_CLI_COMMAND='"C:\Program Files\Python\python.exe" probe'`. An
+  unquoted one is split, and the resulting `not found` names the argv it
+  actually attempted so the split is visible in the same line as the failure.
 - **A pool is sized by the quorum it has to satisfy.** `DRIVER_QUORUM` is how
   many independent opinions you want, so it is how many extractors a declared
   source gets. A pool smaller than the quorum could never agree, and a
@@ -388,7 +400,7 @@ in flight, and it must never read another project's keys or state.
 | `DRIVER_TOKEN` | generated | the REST bearer token; set it to one you hold |
 | `DRIVER_HOST` | `127.0.0.1` | loopback only; an empty value does not widen it |
 | `DRIVER_PORT` | `8791` | `0` asks the OS for a free port |
-| `DRIVER_CLI_COMMAND` | — | declare the `cli` tier; tokenised, never shelled |
+| `DRIVER_CLI_COMMAND` | — | declare the `cli` tier; quoted arguments only, no escapes |
 | `DRIVER_MCP_COMMAND` | — | declare the `mcp` tier (needs `DRIVER_MCP_TOOL` too) |
 | `DRIVER_MCP_TOOL` | — | the tool to call; half a declaration enables nothing |
 | `DRIVER_DOM_URL` | — | declare the `dom` tier |
@@ -489,7 +501,7 @@ Before pointing this at a real machine:
 ## Development
 
 ```bash
-python -m unittest discover -s tests -t .    # 326 hermetic tests
+python -m unittest discover -s tests -t .    # 343 hermetic tests
 ruff check driver_core tests tools
 python tools/tier_order_run.py               # the tier chain, live
 python tools/live_action_run.py              # a declared action, live
