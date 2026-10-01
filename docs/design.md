@@ -205,7 +205,11 @@ may change it, and the ones that used to be stated twice now are not.
 
 | Fact | Owner | Everyone else |
 |---|---|---|
-| The four target classes, and their tier order | `perception` | reads the constants |
+| The four target classes, `Target`, `Capture`, `StructuredSource` | `observation` | the vocabulary, imported by everyone below |
+| The tier order, and what a refusal says | `chain` | names no adapter, and no adapter can name it |
+| How a CLI / MCP / DOM / screen source reads one system | `adapters` | knows no order, no other adapter, no tier |
+| How a JSON-RPC stream and an HTML document are read | `parsing` | stdlib only; knows no source, target or tier |
+| Everything above, under one import | `perception` (façade) | defines nothing; nothing below imports it |
 | The schemas, and which class each one serves | `states` | asks `resolve_wire_target` |
 | What a wire name means, or that it means nothing | `states.resolve_wire_target` | the CLI and the service both call it; neither re-decides |
 | What was declared (`DRIVER_*`) | `config.Settings` | pure data, no perception imports |
@@ -215,9 +219,23 @@ may change it, and the ones that used to be stated twice now are not.
 | Whether a request is authorised | `Handler._authorised` | the only place a token is read |
 | Endpoint logic, free of HTTP | `Service` | `Handler` adds transport and nothing else |
 
-Three of these were duplicated, and each duplication had already cost
-something:
+Four of these were stated more than once, or crowded together, and each had
+already cost something:
 
+* **The perception tier was one file carrying five concerns** — chain policy,
+  a generic source, three concrete adapters, JSON-RPC response parsing, and an
+  HTML parser written as a closure inside `read_document`. Chain policy
+  sitting beside HTML scraping meant a change to how the chain picks a source
+  required understanding how a document is scraped, and a scraping bug was
+  findable next to tier selection. It is now four owners, with the arrows
+  pointing one way: `parsing` and `observation` know nothing of the tier,
+  `adapters` cannot see the order it is tried in, and `chain` needs no
+  concrete adapter to pick one. The seam is enforced rather than documented —
+  `tests/test_declarations.ModuleSeamTests` walks the import graph and fails
+  the build if an edge reappears. It has teeth: making `adapters` import
+  `chain` and `chain` import `adapters` does not merely fail the test, it
+  raises `ImportError` at collection, because a cycle is exactly what those
+  two edges would create.
 * **`Settings.declared_sources()` and `wiring.configured_sources()`** both
   answered "which tiers are live" from the same four settings. Two lists that
   had to be kept in step by hand, and a pure-declaration module that had to

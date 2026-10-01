@@ -1,10 +1,17 @@
-"""Declaration guards and the OS boundary.
+"""Declaration guards, the OS boundary, and the perception seam.
 
 The OS boundary test is the one that keeps a platform difference from being
 rediscovered by a user on the platform nobody tested. It is a build-failing
 scan, not a convention, and it is deliberately written as an AST walk rather
 than a grep so that ``import subprocess as sp`` and
 ``os.name`` behind an alias are both caught.
+
+:class:`ModuleSeamTests` is the same kind of guard for a different kind of
+accident. A capture chain living in one file with three adapters and an HTML
+parser can drift back together at any time, and every one of those merges is
+invisible until a change to tier order needs reading a document scraper to be
+made safely. The seam is cheap to lose and cheap to state, so it is stated
+here as an import graph and checked.
 """
 import ast
 import os
@@ -44,6 +51,22 @@ def _package_modules():
     for name in sorted(os.listdir(PACKAGE)):
         if name.endswith(".py"):
             yield name, os.path.join(PACKAGE, name)
+
+
+def _sibling_imports(name):
+    """The sibling modules ``name`` imports, by module name.
+
+    Relative imports only. A sibling reached through an absolute name is still
+    a sibling, but the package has no such import today and asserting on the
+    relative form keeps the guard readable.
+    """
+    path = os.path.join(PACKAGE, name)
+    tree = ast.parse(pathlib.Path(path).read_text(encoding="utf-8"), path)
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level == 1:
+            found.add((node.module or "").split(".")[0])
+    return found
 
 
 class OsBoundaryTests(unittest.TestCase):
@@ -215,6 +238,49 @@ class PerceptionTests(unittest.TestCase):
         capture = source.capture("t")
         self.assertFalse(capture.ok)
         self.assertIn("nothing", capture.detail)
+
+
+class ModuleSeamTests(unittest.TestCase):
+
+    #: The perception tier's four owners and, for each, the siblings it is
+    #: forbidden to import. ``perception`` is the façade: it may reach all
+    #: four, and none of the four may reach it, which keeps the cycle shut.
+    FORBIDDEN = {
+        "parsing.py": {"observation", "adapters", "chain", "perception"},
+        "observation.py": {"adapters", "chain", "parsing", "perception"},
+        "adapters.py": {"chain", "perception"},
+        "chain.py": {"adapters", "parsing", "perception"},
+    }
+
+    def test_the_seam_modules_exist_under_the_names_the_table_names(self):
+        modules = dict(_package_modules())
+        missing = (set(self.FORBIDDEN) | {"perception.py"}) - set(modules)
+        self.assertEqual(sorted(missing), [],
+                         "the perception tier's modules moved; update the table")
+
+    def test_no_module_reaches_across_a_forbidden_edge(self):
+        """The whole seam, in one walk: no adapter may name the order, no
+        policy may name an adapter, no vocabulary may name either, and nothing
+        beneath the façade may name the façade."""
+        findings = []
+        for name, forbidden in self.FORBIDDEN.items():
+            reached = _sibling_imports(name) & forbidden
+            if reached:
+                findings.append(f"{name} imports {sorted(reached)}")
+        self.assertEqual(findings, [], "; ".join(findings))
+
+    def test_a_parser_imports_nothing_at_all(self):
+        """Stronger than the table above, which only bans today's siblings:
+        a wire-format reader should stay answerable from the standard library
+        alone, and a sixth module is not a licence to reach into it."""
+        self.assertEqual(_sibling_imports("parsing.py"), set())
+
+    def test_the_os_boundary_still_covers_every_split_module(self):
+        """The scan globs the directory, so the split could in principle have
+        left a file outside its reach. This pins that it did not."""
+        scanned = dict(_package_modules())
+        for name in ("adapters.py", "chain.py", "observation.py", "parsing.py"):
+            self.assertIn(name, scanned)
 
 
 if __name__ == "__main__":
