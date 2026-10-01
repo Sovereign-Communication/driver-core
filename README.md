@@ -75,11 +75,44 @@ with a screen source that raises if touched.
 | `cli` | `CliSource` — a real argv subprocess | free |
 | `mcp` | `McpSource` — real JSON-RPC over stdio | free |
 | `dom` | `DomSource` — real fetch, stdlib HTML parser | free |
-| `gui` | `ScreenSource` → vision extractors | billed |
+| `gui` | `ScreenSource` → `VisionExtractor` | billed |
 
 Three of the four classes never reach a vision extractor, and extraction is
 a *pool* — so the alternative is paying N times to describe a lossy rendering
 of state that was already available exactly.
+
+### The vision tier uses the same client as everything else
+
+`VisionExtractor` reaches the model through the same `Settings`, the same
+`SYSTEM_ONE_URL`, the same `Budget`, the same `AuditLog`, the same
+`transport`, and the same price list the decision tier uses. There is no
+second provider, no second key, and no way to declare one — the constructor
+has no parameter through which a caller could introduce a different endpoint.
+
+That consolidation is the point rather than tidiness. The vision extractor
+previously took its own `endpoint` and `api_key`, so extraction could be
+pointed at a different model than the decision tier, and it charged
+**nothing at all** — meaning a vision pool could spend straight past a run
+ceiling sized for the decision tier alone. Extraction is a pool, so that was
+N unaccounted calls per step. Vision spend is now on the shared budget and
+settles like the decision tier's: `actual` when the provider reports usage,
+`estimated` when it reports some, and the **full reservation** when it
+reports none — never zero.
+
+### Nothing which came off a screen comes back out
+
+The image goes in, validated fields come out, and nothing in between is
+written into an envelope, a result, or the audit chain. The vision audit
+record is an explicit allowlist of metadata — `ok`, `reason`, `model`,
+`cost_usd`, `usage_source` — so a field added to `Extraction` later cannot
+leak into the log by default.
+
+That is enforced by a test with a sentinel rather than by care: a capture is
+loaded with a unique marker, the fake provider is made to **echo that marker
+back** in its response (the hostile case — it models a provider including
+the request echo), and the audit chain, the votes, the consensus receipt and
+the on-disk chain are all searched for it. The guard has teeth: injecting a
+one-line leak into the audit record fails four of those tests.
 
 A bare string target is still accepted, and is deliberately weaker: an
 undeclared class permits any source, pixels last. That preserves every
@@ -117,6 +150,7 @@ and more auditable than splicing a caller string into one.
 |---|---|
 | **A disagreement never reaches the model** | enforced in the pipeline; the test asserts the fake decision client was never called |
 | **Three of four targets never see pixels** | declared per target class; a screen source is not a candidate for `cli`, `mcp` or `dom` |
+| **Screen content never comes back out** | a sentinel test greps the audit chain, votes and receipt; a one-line leak fails it |
 | **Unanswered ≠ agreeing** | three distinct outcomes: `agreed`, `disagreed`, `insufficient` |
 | **Spend is refused before dispatch** | reserve → dispatch once → settle once; a call whose usage is unreadable is charged at the full estimate, never zero |
 | **No model past the action tier** | executors are named, registered, and closed; an unregistered name is a refusal, not a skip |
@@ -307,13 +341,17 @@ pointing this at a real machine:
 ## Development
 
 ```bash
-python -m unittest discover -s tests -t .    # 229 hermetic tests
+python -m unittest discover -s tests -t .    # 246 hermetic tests
 ruff check driver_core tests
 python tools/tier_order_run.py               # the tier chain, live
 python tools/live_action_run.py              # a declared action, live
-ruff check driver_core tests
-python tools/tier_order_run.py               # the tier chain, live
+python tools/vision_run.py                   # the vision tier (needs a key)
 ```
+
+`tools/vision_run.py` uses `DRIVER_JEV_API_KEY` and the real endpoint when a
+key is configured, and **reports that the live call was skipped when one is
+not** — it never substitutes a provider, because a run that passes against a
+stand-in is evidence of nothing.
 
 The suite is hermetic: no network, no model, no screen, no disk. Fakes live in
 `driver_core/ev.py` and are injected at the seams, which is only possible

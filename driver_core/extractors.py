@@ -23,15 +23,20 @@ output, DOM/accessibility trees and MCP results, where the "state" is
 already structured. Three of the four target classes need no vision at all,
 and this is the class that makes them work.
 
-:class:`ModelExtractor` spends money and can be wrong. It exists for native
-GUI pixels, where there is no structured source to read.
+:class:`VisionExtractor` spends money and can be wrong. It exists for native
+GUI pixels, where there is no structured source to read. It reaches the
+model through the same client primitives the decision tier uses -- one
+endpoint, one key, one budget, one price list -- and it is the only extractor
+whose spend reaches the run ceiling.
 """
 import json
 
 from . import transport
-from .budget import UNAVAILABLE
+from .budget import UNAVAILABLE, estimate_call_cost
+from .config import JEV_INPUT_PRICE_PER_MILLION
 from .consensus import Vote
 from .errors import SchemaError
+from .jev_client import SYSTEM_ONE_URL
 from .perception import VISION_CLASS
 from .schema import validate_state
 
@@ -105,17 +110,34 @@ class StructuredExtractor:
         return Extraction(state=state, usage_source="actual", cost=0.0)
 
 
-class ModelExtractor:
+class VisionExtractor:
     """Vision extraction: one model, one opinion, charged honestly.
 
     The last resort, and the only extractor here that costs money or can be
     wrong in a way code cannot check. Three of the four target classes never
     reach it, and that is enforced by which pool a target selects rather than
-    by this class refusing to help -- see
-    :meth:`ExtractorPool.for_target`.
+    by this class refusing to help -- see :meth:`ExtractorPool.for_target`.
+
+    **It goes through the same client primitives as the decision tier.** The
+    same :class:`~driver_core.config.Settings`, the same
+    :data:`~driver_core.jev_client.SYSTEM_ONE_URL`, the same
+    :class:`~driver_core.budget.Budget`, the same
+    :class:`~driver_core.audit.AuditLog`, the same
+    :mod:`driver_core.transport`, and the same
+    :data:`~driver_core.config.JEV_INPUT_PRICE_PER_MILLION`. There is no
+    second provider, no second key, and no second price list.
+
+    That consolidation is the point, not tidiness. The previous version took
+    its own ``endpoint`` and ``api_key``, which meant extraction could be
+    pointed at a different model than the decision tier, and it charged
+    nothing at all -- so a vision pool could spend straight past a run
+    ceiling that had been sized for the decision tier alone. Extraction is a
+    pool, so that was N unaccounted calls per step.
 
     Runs in its own try/except so a provider that hangs, rate-limits, or
-    returns a refusal becomes one failed slot rather than a failed round.
+    returns a refusal becomes one failed slot rather than a failed round --
+    and still settles its reservation, because a failed call is possibly a
+    billed one.
     """
 
     deterministic = False
@@ -125,65 +147,146 @@ class ModelExtractor:
     #: inspecting the objects in it.
     serves = (VISION_CLASS,)
 
-    def __init__(self, slot, model, *, endpoint, api_key, transport_module=None,
-                 timeout=90):
+    def __init__(self, slot, settings, *, budget, audit,
+                 transport_module=None, timeout=90):
         self.slot = slot
-        self.model = model
-        self.endpoint = endpoint
-        self.api_key = api_key
+        self.settings = settings
+        self.budget = budget
+        self.audit = audit
         self._transport = transport_module or transport
         self.timeout = timeout
 
     def extract(self, capture, schema):
-        if not self.api_key:
-            return Extraction(reason="no key for this extractor")
-        fields = "\n".join(
-            f"- {f.name} ({f.type}"
-            + (f"/{f.presence}" if f.presence != "required" else "")
-            + f"): {f.description}" for f in schema.fields)
-        questions = {
-            "observation": transport.choice(
-                EXTRACTION_INSTRUCTIONS.format(fields=fields),
-                {"observed": "The screen was read and the fields are "
-                             "reported in the structured reply.",
-                 "unreadable": "The screen could not be read; no fields are "
-                               "reported."}),
-        }
+        if not self.settings.keyed:
+            # No call, no reservation, no charge. An unkeyed vision slot is
+            # "unavailable", never "answered nothing".
+            return self._record(Extraction(reason="no key for vision "
+                                                   "extraction"))
+
+        questions = _extraction_questions(schema)
+        estimate = _estimate_capture_tokens(capture, questions)
+        reserve_usd = estimate_call_cost(
+            estimate, price_per_million=JEV_INPUT_PRICE_PER_MILLION)
+
+        try:
+            reservation = self.budget.reserve(reserve_usd, label=self.slot)
+        except Exception as exc:
+            # Refused before dispatch, so nothing was spent.
+            return self._record(Extraction(reason=f"budget refused: {exc}"))
+
         try:
             response = self._transport.call_service(
-                self.endpoint, questions,
-                headers={"Authorization": f"Bearer {self.api_key}"},
+                SYSTEM_ONE_URL, questions,
+                headers={"Authorization":
+                         f"Bearer {self.settings.jev_api_key}"},
                 timeout=self.timeout,
                 body_extra={"state": _capture_state(capture),
-                            "model": self.model})
+                            "model": self.settings.jev_model})
         except Exception as exc:
-            return Extraction(reason=f"transport raised: {exc}")
+            charged = reservation.settle(None)
+            return self._record(Extraction(
+                reason=f"transport raised: {exc}", cost=charged,
+                model=self.settings.jev_model))
 
         usage = response.usage() or {}
         input_tokens = int(usage.get("input_tokens") or 0)
-        # A failed call is still possibly a billed call. Reporting zero here
+        # A failed call is still possibly a billed call. Settling at zero here
         # is how a vision loop quietly runs up a bill nobody can account for.
-        cost = 0.0
-        usage_source = UNAVAILABLE
-        if usage and input_tokens:
-            cost = input_tokens * 0.0000021  # nominal input rate, per 1M
+        if response.ok and usage and input_tokens:
+            charged = reservation.settle(
+                estimate_call_cost(
+                    input_tokens, price_per_million=JEV_INPUT_PRICE_PER_MILLION),
+                source="actual")
             usage_source = "actual"
-        elif usage:
-            cost = 0.0
+        elif response.ok and usage:
+            charged = reservation.settle(
+                reserve_usd, source="estimated")
             usage_source = "estimated"
+        else:
+            charged = reservation.settle(None)
+            usage_source = UNAVAILABLE
 
         if not response.ok:
-            return Extraction(reason=f"{response.outcome}: {response.detail}",
-                              cost=cost, usage_source=usage_source,
-                              model=self.model)
-        payload = response.payload or {}
-        state = _state_from_payload(payload, schema)
+            return self._record(Extraction(
+                reason=f"{response.outcome}: {response.detail}", cost=charged,
+                usage_source=usage_source, model=self.settings.jev_model))
+
+        state = _state_from_payload(response.payload, schema)
         if state is None:
-            return Extraction(reason="model returned no parseable state",
-                              cost=cost, usage_source=usage_source,
-                              model=self.model)
-        return Extraction(state=state, cost=cost, usage_source=usage_source,
-                          model=self.model)
+            return self._record(Extraction(
+                reason="model returned no parseable state", cost=charged,
+                usage_source=usage_source, model=self.settings.jev_model))
+        return self._record(Extraction(
+            state=state, cost=charged, usage_source=usage_source,
+            model=self.settings.jev_model))
+
+    def _record(self, extraction):
+        """Write one metadata-only audit record. Never the state, never the
+        image.
+
+        The fields below are an explicit allowlist rather than a filtered
+        copy of something else, so a field added to :class:`Extraction`
+        later cannot leak into the log by default. The pixels went in; the
+        validated fields came out; nothing in between is written down.
+        """
+        if self.audit is not None:
+            self.audit.append(
+                "extraction",
+                step_id=self.slot,
+                tier="vision",
+                ok=extraction.ok,
+                reason=extraction.reason,
+                model=extraction.model,
+                cost_usd=round(extraction.cost, 9),
+                usage_source=extraction.usage_source,
+            )
+        return extraction
+
+
+def _extraction_questions(schema):
+    fields = "\n".join(
+        f"- {f.name} ({f.type}"
+        + (f"/{f.presence}" if f.presence != "required" else "")
+        + f"): {f.description}" for f in schema.fields)
+    return {
+        "observation": transport.choice(
+            EXTRACTION_INSTRUCTIONS.format(fields=fields),
+            {"observed": "The screen was read and the fields are "
+                         "reported in the structured reply.",
+             "unreadable": "The screen could not be read; no fields are "
+                           "reported."}),
+    }
+
+
+def _estimate_capture_tokens(capture, questions):
+    """A pre-flight upper bound, using the decision tier's own approximation.
+
+    The capture is opaque here -- a path, a base64 blob, a handle. Its
+    serialised size is a safe over-estimate of what the provider will read,
+    and it errs high on purpose: a reservation that is too large costs a
+    refusal, while one that is too small silently under-bills.
+    """
+    material = len(json.dumps(_capture_state(capture), default=str).encode(
+        "utf-8"))
+    material += len(json.dumps(questions, default=str).encode("utf-8"))
+    return max(1, material // 4 + 1)
+
+
+def build_vision_pool(settings, *, budget, audit, slots=1,
+                      transport_module=None, timeout=90):
+    """A pool of independent vision slots, for the ``gui`` target class.
+
+    Built here rather than by the caller so that the vision pool is
+    constructed the same way every time: same endpoint, same budget, same
+    audit log as the decision tier. A caller who wants two independent
+    opinions asks for two slots; they do not assemble their own clients.
+    """
+    names = (f"vision-{i}" for i in range(max(1, int(slots))))
+    return ExtractorPool(
+        [VisionExtractor(name, settings, budget=budget, audit=audit,
+                         transport_module=transport_module, timeout=timeout)
+         for name in names],
+        serves=(VISION_CLASS,))
 
 
 def _state_from_payload(payload, schema):
