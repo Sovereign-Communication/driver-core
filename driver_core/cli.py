@@ -28,7 +28,7 @@ from .driver import Driver
 from .executor import Consent, normalise_params
 from .perception import Target
 from .server import Service, serve
-from .states import WIRE_TARGETS
+from .states import WIRE_TARGETS, resolve_wire_target
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
@@ -120,9 +120,14 @@ def cmd_step(args, driver):
         # document that a script can parse without stripping a preamble.
         print(f"[consent] {json.dumps(consent.to_dict(), sort_keys=True)}",
               file=sys.stderr)
-    # Resolved through the same table the service uses, so the CLI and the
-    # REST surface cannot drift into disagreeing about what a class is.
-    target_class, schema = WIRE_TARGETS[args.schema]
+    # Resolved through the one rule the service uses, so the two surfaces
+    # cannot drift into disagreeing about what a class is. The service
+    # refuses an absent ``schema`` and this flag defaults to ``gui``; that
+    # asymmetry is deliberate and lives here rather than in the rule, which
+    # is why a person at a terminal is not forced to type a flag to look at
+    # something while a host integrating over HTTP is made to declare what it
+    # is looking at.
+    target_class, schema = resolve_wire_target(args.schema)
     result = driver.step(Target(args.target, target_class), schema=schema,
                          consent=consent,
                          prefer=tuple(args.prefer or ()),

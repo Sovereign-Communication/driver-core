@@ -15,6 +15,13 @@ mapping it wants.
 
 Every setting is also overridable by constructor argument, so a test or an
 embedded caller never has to mutate the process environment at all.
+
+This module states *what was declared* and nothing more. Which tiers that
+declaration turns into is :mod:`driver_core.wiring`'s job, and the driver
+holds the answer -- an earlier version also answered here, which meant the
+same four settings were read twice to produce two lists that had to be kept
+in agreement by hand, and that a pure declaration had to import the
+perception taxonomy just to order one of them.
 """
 import os
 from dataclasses import dataclass, field, replace
@@ -165,27 +172,11 @@ class Settings:
             "confidence_threshold": self.confidence_threshold,
             "dry_run": self.dry_run,
             "allow_write": self.allow_write,
-            "sources": self.declared_sources(),
         }
         return data
 
     def with_overrides(self, **kwargs):
         return replace(self, **kwargs)
-
-    def declared_sources(self):
-        """Which perception sources this configuration enables, by name.
-
-        Reported by ``/health`` so an operator can see what the driver is
-        actually able to observe without reading a source list out of a
-        running process. Order is the declared tier order, not the order the
-        settings happen to be written in.
-        """
-        from .perception import SOURCE_ORDER
-        enabled = {"cli": bool(self.cli_command),
-                   "mcp": bool(self.mcp_command and self.mcp_tool),
-                   "dom": bool(self.dom_url),
-                   "screen": bool(self.screen_enabled)}
-        return [name for name in SOURCE_ORDER if enabled[name]]
 
 
 def load_settings(env=None, **overrides):

@@ -18,7 +18,9 @@ What it proves, in order:
 * **nothing configured observes nothing** -- and says so honestly rather than
   falling back to pixels;
 * **one setting enables exactly one tier**, and the vision tier is never
-  enabled by the presence of another setting;
+  enabled by the presence of another setting -- and the driver reports the
+  one list it actually holds, rather than a second list derived from the
+  same settings;
 * **a declared command really runs**, end to end through capture, extraction,
   tally, gates and a read-only execution;
 * **a declared command is tokenised, never shelled** -- ``>`` in a
@@ -184,11 +186,11 @@ def run_all(workdir):
     settings = load_settings(env=env)
     health = Service(driver=Driver(settings=settings, audit=MemoryAuditLog()),
                      token="t").health()
+    # One place, not two. The answer used to be stated by the settings *and*
+    # by the driver, which meant an operator had two lists to compare and a
+    # change had to keep them in step by hand.
     check("/health reports exactly the declared tier",
           health["sources"] == ["cli"], str(health["sources"]))
-    check("...in both places an operator looks",
-          health["settings"]["sources"] == ["cli"],
-          str(health["settings"].get("sources")))
 
     # ---- 2b. the vision tier, declared once and only once ---------------
     show("DRIVER_SCREEN declares the vision tier, exactly once")

@@ -197,6 +197,58 @@ description of the operator's screen. A convenience default that is safe for
 one caller and unsafe for another is a defect, and the safe behaviour has to
 be the default.
 
+## Where each fact is owned
+
+Structure is only worth having where a fact has exactly one home, so this is
+the short version: for each thing the driver knows, there is one module that
+may change it, and the ones that used to be stated twice now are not.
+
+| Fact | Owner | Everyone else |
+|---|---|---|
+| The four target classes, and their tier order | `perception` | reads the constants |
+| The schemas, and which class each one serves | `states` | asks `resolve_wire_target` |
+| What a wire name means, or that it means nothing | `states.resolve_wire_target` | the CLI and the service both call it; neither re-decides |
+| What was declared (`DRIVER_*`) | `config.Settings` | pure data, no perception imports |
+| Which tiers are actually live | the driver's `sources` | `health` reports the list it holds |
+| The ordered chain a step may consult | `Driver.sources` | `screen` is derived from it |
+| The pipeline order and the budget per step | `Driver` | — |
+| Whether a request is authorised | `Handler._authorised` | the only place a token is read |
+| Endpoint logic, free of HTTP | `Service` | `Handler` adds transport and nothing else |
+
+Three of these were duplicated, and each duplication had already cost
+something:
+
+* **`Settings.declared_sources()` and `wiring.configured_sources()`** both
+  answered "which tiers are live" from the same four settings. Two lists that
+  had to be kept in step by hand, and a pure-declaration module that had to
+  import the perception taxonomy just to order one of them. The driver holds
+  the truthful answer, so the settings-level copy is gone and `/health`
+  reports the list the driver actually has.
+* **`Driver.sources` and `Driver.screen`** were two handles onto one set,
+  reconciled by a method every caller had to remember to use. Getting it
+  wrong was not hypothetical — it reported the vision tier twice and would
+  have captured the same pixels twice on every step. There is now one list,
+  and `screen` is a property that reads it.
+* **"Resolve a wire `schema`"** was a bare lookup in the CLI and a
+  lookup-or-refuse in the service, with the CLI defaulting to `gui` and the
+  service refusing. The rule now lives once, beside the table it interprets;
+  what each surface *does* about a bad name (print it, or answer 400) is its
+  own business and stays there.
+
+The one deliberate asymmetry left in place: the CLI still defaults
+`--schema` to `gui` and the service still refuses an absent `schema`. A
+person at a terminal should not have to type a flag to look at something; a
+host integrating over HTTP should have to say what it is looking at. That is
+a difference of interface, and it is commented at the CLI's call site rather
+than smuggled into the shared rule.
+
+The other thing worth stating: `Driver`'s collaborators are each *declared or
+supplied*, never merged. Passing `pools` gives exactly those pools. The
+earlier version merged the declared pools underneath whatever the caller
+passed, which meant the same argument meant "the declared ones" or "none"
+depending on the other arguments, and needed a three-way sentinel dance to
+express.
+
 ## What was rejected
 
 **A general vision model in the action loop.** Rejected: the action tier

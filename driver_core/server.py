@@ -31,7 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .config import load_settings
 from .driver import Driver
-from .errors import DriverError
+from .errors import DriverError, PerceptionUnavailable
 from .perception import Target
 
 #: The closed set of stop reasons. Callers may branch on these; nothing else
@@ -60,19 +60,6 @@ def _wrapped(status, payload):
     return {_ENVELOPE: True, "status": status, "body": payload}
 
 
-def _drain_length(headers):
-    """The declared body length, or 0 when there is nothing to read.
-
-    A malformed ``Content-Length`` counts as nothing: this runs on the
-    refusal path, where the answer is already decided and the only question
-    is how much has to be read before the socket can be closed cleanly.
-    """
-    try:
-        return max(0, int(headers.get("Content-Length") or 0))
-    except (TypeError, ValueError):
-        return 0
-
-
 def _refused(reason, detail="", **extra):
     if reason not in STOP_REASONS:
         raise DriverError(f"{reason!r} is not a declared stop reason")
@@ -99,7 +86,7 @@ class Service:
             "keyed": self.driver.settings.keyed,
             "settings": self.driver.settings.redacted(),
             "vocabulary": self.driver.vocabulary.to_dict(),
-            "sources": [s.name for s in self.driver.observation_sources()],
+            "sources": [s.name for s in self.driver.sources],
         })
 
     def schemas(self, body=None):
@@ -149,7 +136,7 @@ class Service:
         return _wrapped(200, result.to_dict())
 
     def _resolve_target(self, name):
-        """Bind one wire ``schema`` name to a target class and a schema.
+        """Bind a wire ``schema`` name, or refuse.
 
         **An absent or unknown name is refused.** It is not defaulted: the
         earlier version resolved ``None`` to the screen schema while leaving
@@ -157,16 +144,16 @@ class Service:
         answer with pixels last -- so the one request a caller made without
         thinking was the one that could reach the vision tier at all. There is
         no default that fixes this, so the service asks.
+
+        The rule is :func:`driver_core.states.resolve_wire_target`; the only
+        thing decided here is that the caller's mistake is a 400 rather than
+        a transport error.
         """
-        from .states import WIRE_TARGETS
-        if name is None or not str(name).strip():
-            return {"error": "schema is required; declare one of "
-                             f"{sorted(WIRE_TARGETS)}"}
-        key = str(name).strip().lower()
-        if key not in WIRE_TARGETS:
-            return {"error": f"unknown schema {name!r}; declared schemas are "
-                             f"{sorted(WIRE_TARGETS)}"}
-        return WIRE_TARGETS[key]
+        from .states import resolve_wire_target
+        try:
+            return resolve_wire_target(name)
+        except PerceptionUnavailable as exc:
+            return {"error": str(exc)}
 
     def _consent_for(self, body):
         """The consent for this request, bound to one ``(action, params)``.
@@ -217,13 +204,12 @@ class Service:
         return _wrapped(200, outcome)
 
 
-#: How much of an unauthenticated request body is read and thrown away so
-#: that the refusal reaches the client. See :meth:`Handler._refuse`.
-MAX_UNAUTHENTICATED_DRAIN_BYTES = 1 << 20
-
-
 class Handler(BaseHTTPRequestHandler):
     server_version = "driver-core"
+
+    #: How much of an unauthenticated request body is read and thrown away so
+    #: that the refusal reaches the client. See :meth:`_refuse`.
+    max_drain_bytes = 1 << 20
 
     def log_message(self, fmt, *args):  # keep the console usable
         pass
@@ -266,7 +252,14 @@ class Handler(BaseHTTPRequestHandler):
         no ``Content-Length`` to read against and is not supported by this
         server in any path.
         """
-        remaining = min(_drain_length(self.headers), MAX_UNAUTHENTICATED_DRAIN_BYTES)
+        # A malformed Content-Length counts as nothing: the answer is already
+        # decided, and the only question left is how much has to be read
+        # before the socket can be closed cleanly.
+        try:
+            remaining = min(max(0, int(self.headers.get("Content-Length") or 0)),
+                            self.max_drain_bytes)
+        except ValueError:
+            remaining = 0
         while remaining > 0:
             chunk = self.rfile.read(min(remaining, 65536))
             if not chunk:
