@@ -28,6 +28,7 @@ small enough to read and cannot become a second copy of sensitive screen
 content.
 """
 from . import transport
+from .audit import KIND_DECISION
 from .budget import UNAVAILABLE as USAGE_UNAVAILABLE
 from .budget import estimate_call_cost
 from .config import JEV_INPUT_PRICE_PER_MILLION
@@ -387,5 +388,5 @@ class JevClient:
         fields["step_id"] = step_id
         if receipt is not None:
             fields["extraction"] = receipt
-        self.audit.append("decision", **fields)
+        self.audit.append(KIND_DECISION, **fields)
         return decision

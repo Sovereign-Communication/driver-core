@@ -42,7 +42,9 @@ import uuid
 
 from . import policy
 from .actions import DEFAULT_VOCABULARY
-from .audit import AuditLog
+from .audit import (
+    KIND_CAPTURE, KIND_ESCALATION, KIND_EXTRACTION, KIND_REFUSAL, AuditLog,
+)
 from .budget import Budget
 from .consensus import tally
 from .config import Settings, default_audit_path, load_settings
@@ -188,14 +190,14 @@ class Driver:
             capture = self._capture(target, prefer)
         except PerceptionUnavailable as exc:
             return self._stop(step_id, "capture", "no_capture", str(exc))
-        self.audit.append("capture", step_id=step_id, **capture.summary())
+        self.audit.append(KIND_CAPTURE, step_id=step_id, **capture.summary())
 
         # 2 + 3. extract and tally
         votes = self._pool_for(capture).run(capture, schema)
         agreement = tally(votes, schema, quorum=self.settings.quorum,
                           min_agreement=self.settings.min_agreement)
         receipt = agreement.receipt(schema.identity(), step_id)
-        self.audit.append("extraction", step_id=step_id, **receipt)
+        self.audit.append(KIND_EXTRACTION, step_id=step_id, **receipt)
 
         # 4. gate before any model sees the state
         gate = policy.check_agreement(
@@ -215,7 +217,7 @@ class Driver:
             decision, threshold=self.settings.confidence_threshold,
             require_stable=require_stable)
         if not decision_gate.passed:
-            self.audit.append("escalation", step_id=step_id,
+            self.audit.append(KIND_ESCALATION, step_id=step_id,
                               reason=decision_gate.reason,
                               detail=decision_gate.detail)
             return self._stop(step_id, "decision", decision_gate.reason,
@@ -302,7 +304,7 @@ class Driver:
         return self.pool
 
     def _stop(self, step_id, stopped_at, reason, detail, **kwargs):
-        self.audit.append("refusal", step_id=step_id, stopped_at=stopped_at,
+        self.audit.append(KIND_REFUSAL, step_id=step_id, stopped_at=stopped_at,
                           reason=reason, detail=detail)
         return StepResult(step_id, ok=False, stopped_at=stopped_at,
                           reason=reason, detail=detail, **kwargs)

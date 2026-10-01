@@ -31,6 +31,7 @@ happens to skip the interesting part.
 """
 from . import osal
 from .actions import IRREVERSIBLE, READ_ONLY
+from .audit import KIND_ACTION
 from .errors import ConsentError, ExecutorError, VocabularyError
 
 #: Declared parameter normalisers, by name. An ``Action`` names one; this is
@@ -277,7 +278,7 @@ class Executor:
 
         if self.audit is not None:
             self.audit.append(
-                "action", step_id=step_id, action=action.name,
+                KIND_ACTION, step_id=step_id, action=action.name,
                 action_class=action.action_class, ok=result.ok,
                 detail=result.detail, dry_run=result.dry_run,
                 consent=consent.to_dict() if consent else None)

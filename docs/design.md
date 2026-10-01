@@ -220,10 +220,35 @@ may change it, and the ones that used to be stated twice now are not.
 | Whether a declared token is acceptable | `config.validated_token` | one rule, applied where `DRIVER_TOKEN` is read |
 | Which port and host were bound | `serve`, from `server_address` | not from the arguments it was handed |
 | How a declared command becomes an argv | `wiring.parse_argv` | one rule, no escapes, nothing guessed |
+| What a record in the audit log is called | `audit.KIND_*` | producers import the name; no module writes the string |
 | Endpoint logic, free of HTTP | `Service` | `Handler` adds transport and nothing else |
 
-Six of these were stated more than once, or crowded together, and each had
+Seven of these were stated more than once, or crowded together, and each had
 already cost something:
+
+* **The audit log declared a vocabulary its own producers never spoke.**
+  ``audit.py`` held seven ``KIND_*`` constants; ``driver.py``,
+  ``executor.py``, ``extractors.py`` and ``jev_client.py`` each wrote their
+  record kind as a bare string. Six kinds were really in use, one
+  (``KIND_CONSENT``) named a record nothing could produce, and nothing tied
+  the two lists together — so a renamed constant would have left the log
+  writing a kind it no longer declared, with no test able to notice. It is
+  the drift the last three passes removed elsewhere, sitting in the one
+  artifact where a record's meaning is the whole point.
+
+  The producers now import the names, and ``tests/test_audit_compat.py``
+  pins the chain: an existing log must still verify, and the same run must
+  still write the same bytes. That second test is the one that catches a
+  renamed constant, because a log can verify perfectly while meaning
+  something new. ``KIND_CONSENT`` was deleted rather than wired up — a
+  consent is already recorded inside the ``action`` record it authorises,
+  with the exact parameters it was bound to, and adding a second record for
+  the same fact would change what a run writes.
+
+  ``states.FREE_CLASSES`` went in the same pass. It was byte-identical to
+  ``observation.STRUCTURED_CLASSES``, had no readers anywhere, and existed
+  so the "three of four classes need no pixels" claim could be asserted —
+  against a copy, which asserts nothing about the real list.
 
 * **`parse_argv` used POSIX `shlex`, which is a shell, not a tokeniser.**
   `shlex` reads `\` as an escape outside quotes, so
@@ -305,6 +330,19 @@ depending on the other arguments, and needed a three-way sentinel dance to
 express.
 
 ## What was rejected
+
+**Splitting `osal.py` into a package.** Rejected, deliberately.
+:mod:`driver_core.osal` is 534 lines carrying five concerns — process
+running, screen capture across three platforms, synthetic input, an HTTP
+fetch, and filesystem policy — and every one of them is a place the package
+touches the machine. Splitting it would make each file shorter and the
+package harder to audit, because the property worth protecting is not "each
+module has one concern" but "**one module does all OS contact, and a scan
+proves it**". A tree of `osal.*` modules blurs exactly the boundary that
+makes the guarantee checkable, and the AST test in
+``tests/test_declarations.py`` would have to keep reasoning about a package
+instead of a file. The 534 lines are the cost of the guarantee; they are
+paid knowingly rather than discovered later.
 
 **A general vision model in the action loop.** Rejected: the action tier
 would contain no reviewable code, and the cost of a misread screen would be
