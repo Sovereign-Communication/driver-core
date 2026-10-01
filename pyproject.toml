@@ -4,14 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "driver-core"
-# 2.0.0: the wire contract is unchanged (STOP_REASONS, refusal-is-200-ok:false
-# and StepResult.to_dict() are all identical to 1.x), but the consent law is
-# stricter and one CLI flag was removed. Consent is now a capability for one
-# exact (action, params) pair with no wildcard at all, and `step --grant-write`
-# -- which used to mean "every mutating action" -- is gone rather than
-# silently neutered. Hosts posting {"granted": true, "action": "*"} for
-# mutating work now correctly refuse; see the 2.0.0 release notes.
-version = "2.0.0"
+# 3.0.0: the perception tiers are reachable from the product. Sources are
+# registered from declared DRIVER_* settings (DRIVER_CLI_COMMAND,
+# DRIVER_MCP_COMMAND + DRIVER_MCP_TOOL, DRIVER_DOM_URL, DRIVER_SCREEN), and an
+# absent or unrecognised `schema` on POST /step is now a 400 rather than a
+# silent default. Nothing was added to the response -- STOP_REASONS and
+# StepResult.to_dict() are byte-identical to 2.x -- but a host that omitted
+# `schema` used to receive a 200 built on an *undeclared* target class, and an
+# undeclared class permits any source to answer with pixels last. That
+# request now refuses instead. See the 3.0.0 release notes.
+version = "3.0.0"
 description = "Verified extraction -> Jev decision -> deterministic action, for driving a local machine safely."
 readme = "README.md"
 requires-python = ">=3.9"

@@ -42,7 +42,13 @@ def _service(pool=None, jev=None, **over):
     jev = jev or FakeJev(action_answer("observe", confidence=0.95))
     driver = Driver(settings=settings, budget=Budget(1.0, step_ceiling_usd=1.0),
                     audit=MemoryAuditLog(), pool=pool, jev=jev,
-                    sources=[StructuredSource("cli", _source_reader())],
+                    # A deterministic stand-in for a screen capture. It
+                    # declares the gui class explicitly, because the class is
+                    # what decides whether this source may answer at all --
+                    # a source that does not declare the requested class is
+                    # correctly never consulted.
+                    sources=[StructuredSource("screen", _source_reader(),
+                                             serves=("gui",))],
                     executor=__import__(
                         "driver_core.executor", fromlist=["Executor"]
                     ).Executor(vocabulary=__import__(
@@ -67,7 +73,7 @@ class RouteTests(unittest.TestCase):
         self.assertFalse(outcome["body"]["ok"])
 
     def test_a_successful_step_is_a_200(self):
-        outcome = _service().handle("step", {"target": "t"})
+        outcome = _service().handle("step", {"target": "t", "schema": "gui"})
         self.assertEqual(outcome["status"], 200)
         self.assertTrue(outcome["body"]["ok"])
         self.assertEqual(outcome["body"]["execution"]["action"], "observe")
@@ -75,7 +81,7 @@ class RouteTests(unittest.TestCase):
     def test_a_refusal_is_a_200_not_a_5xx(self):
         """A caller that retries on 5xx must never be retrying a decision."""
         jev = FakeJev(action_answer("observe", confidence=0.1))
-        outcome = _service(jev=jev).handle("step", {"target": "t"})
+        outcome = _service(jev=jev).handle("step", {"target": "t", "schema": "gui"})
         self.assertEqual(outcome["status"], 200)
         self.assertFalse(outcome["body"]["ok"])
         self.assertEqual(outcome["body"]["reason"],
@@ -87,10 +93,67 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(outcome["status"], 400)
         self.assertIn("target", outcome["body"]["error"])
 
+    def test_an_absent_schema_is_refused_rather_than_defaulted(self):
+        """Fail closed, not open.
+
+        Resolving an absent ``schema`` to the screen schema while leaving the
+        class undeclared was how the strongest tier stayed reachable by
+        default: an undeclared class permits any source, pixels last. There is
+        no default that fixes this -- any of the four classes would mean
+        observing a different machine than the caller named, or spending
+        money -- so the service asks.
+        """
+        outcome = _service().handle("step", {"target": "t"})
+        self.assertEqual(outcome["status"], 400)
+        self.assertIn("schema is required", outcome["body"]["error"])
+        for name in ("cli", "mcp", "dom", "gui", "screen"):
+            self.assertIn(name, outcome["body"]["error"])
+
+    def test_an_unknown_schema_is_refused_rather_than_guessed(self):
+        outcome = _service().handle("step", {"target": "t", "schema": "banana"})
+        self.assertEqual(outcome["status"], 400)
+        self.assertIn("unknown schema", outcome["body"]["error"])
+
+    def test_an_empty_schema_is_refused_too(self):
+        outcome = _service().handle("step", {"target": "t", "schema": "  "})
+        self.assertEqual(outcome["status"], 400)
+        self.assertIn("schema is required", outcome["body"]["error"])
+
+    def test_mcp_is_now_a_declared_schema_rather_than_a_404(self):
+        """It was in ``SCHEMAS_BY_TARGET`` but not in the wire table."""
+        outcome = _service().handle("step", {"target": "t", "schema": "mcp"})
+        self.assertNotEqual(outcome["status"], 400)
+
+    def test_every_declared_schema_name_resolves_to_a_class_and_a_schema(self):
+        from driver_core.states import WIRE_TARGETS
+        for name in WIRE_TARGETS:
+            outcome = _service().handle("step", {"target": "t", "schema": name})
+            self.assertNotEqual(outcome["status"], 400, name)
+
     def test_verify_reports_the_chain_and_the_spend(self):
         outcome = _service().handle("verify", {})["body"]
         self.assertTrue(outcome["audit"]["ok"])
         self.assertIn("remaining_usd", outcome["budget"])
+
+    def test_a_caller_supplied_step_id_is_the_one_that_comes_back(self):
+        """The host adapter has always sent ``step_id``; it was being
+        dropped and the driver minted its own, so a caller could not join its
+        own log to the audit chain afterwards."""
+        body = _service().handle(
+            "step", {"target": "t", "schema": "gui",
+                     "step_id": "host-abc123"})["body"]
+        self.assertEqual(body["step_id"], "host-abc123")
+
+    def test_an_absent_step_id_is_still_minted(self):
+        body = _service().handle("step", {"target": "t", "schema": "gui"})["body"]
+        self.assertTrue(body["step_id"])
+
+    def test_health_reports_which_sources_the_driver_can_observe(self):
+        """An operator has to be able to see the capability before relying
+        on it, not infer it from a no_capture."""
+        body = _service().handle("health", {})["body"]
+        self.assertIn("sources", body)
+        self.assertIsInstance(body["sources"], list)
 
 
 class HonestyTests(unittest.TestCase):
@@ -100,7 +163,7 @@ class HonestyTests(unittest.TestCase):
                   "foreground_app": "payroll", "error_dialog_present": False}
         pool = ExtractorPool([StructuredExtractor(f"s{i}", _reader(secret))
                               for i in range(2)])
-        outcome = _service(pool=pool).handle("step", {"target": "t"})
+        outcome = _service(pool=pool).handle("step", {"target": "t", "schema": "gui"})
         rendered = str(outcome["body"])
         self.assertNotIn("Confidential Payroll", rendered)
         self.assertNotIn("payroll", rendered)
@@ -110,12 +173,13 @@ class HonestyTests(unittest.TestCase):
 
     def test_a_refusal_carries_a_reason_from_the_closed_set(self):
         jev = FakeJev(action_answer("observe", confidence=0.1))
-        reason = _service(jev=jev).handle("step", {"target": "t"})["body"]["reason"]
+        reason = _service(jev=jev).handle(
+            "step", {"target": "t", "schema": "gui"})["body"]["reason"]
         self.assertIn(reason, STOP_REASONS)
 
     def test_consent_is_not_inferred_from_an_absent_field(self):
         """No consent in the request means no consent, not default consent."""
-        outcome = _service().handle("step", {"target": "t"})
+        outcome = _service().handle("step", {"target": "t", "schema": "gui"})
         body = outcome["body"]
         if body["ok"]:
             # `observe` is read-only, so it legitimately needs none.

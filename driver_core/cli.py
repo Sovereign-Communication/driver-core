@@ -26,8 +26,9 @@ from .actions import DEFAULT_VOCABULARY
 from .config import load_settings
 from .driver import Driver
 from .executor import Consent, normalise_params
+from .perception import Target
 from .server import Service, serve
-from .states import SCREEN_SCHEMA
+from .states import WIRE_TARGETS
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
@@ -47,6 +48,7 @@ def cmd_health(args, driver):
         print(f"driver-core: ok (keyed={settings.keyed})")
         print(f"  vocabulary : {driver.vocabulary.identity()} "
               f"({len(driver.vocabulary)} actions)")
+        print(f"  sources    : {', '.join(payload['sources']) or 'none declared'}")
         print(f"  writes     : {'allowed' if settings.allow_write else 'off'} "
               f"(DRIVER_ALLOW_WRITE)")
         print(f"  budget     : ${driver.budget.remaining:.6f} remaining of "
@@ -118,7 +120,11 @@ def cmd_step(args, driver):
         # document that a script can parse without stripping a preamble.
         print(f"[consent] {json.dumps(consent.to_dict(), sort_keys=True)}",
               file=sys.stderr)
-    result = driver.step(args.target, schema=SCREEN_SCHEMA, consent=consent,
+    # Resolved through the same table the service uses, so the CLI and the
+    # REST surface cannot drift into disagreeing about what a class is.
+    target_class, schema = WIRE_TARGETS[args.schema]
+    result = driver.step(Target(args.target, target_class), schema=schema,
+                         consent=consent,
                          prefer=tuple(args.prefer or ()),
                          require_stable=not args.allow_unstable,
                          params=action_params)
@@ -185,6 +191,11 @@ def build_parser():
 
     step = sub.add_parser("step", help="run one full pipeline step")
     step.add_argument("target", help="what to observe")
+    step.add_argument(
+        "--schema", default="gui", choices=sorted(WIRE_TARGETS),
+        help="the target class to observe; required at the HTTP boundary and "
+             "explicit here because a default would silently observe a "
+             "different machine than the one you named")
     step.add_argument("--prefer", action="append",
                       help="prefer a structured source (cli, mcp, dom)")
     step.add_argument(

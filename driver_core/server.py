@@ -32,6 +32,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .config import load_settings
 from .driver import Driver
 from .errors import DriverError
+from .perception import Target
 
 #: The closed set of stop reasons. Callers may branch on these; nothing else
 #: about a blocked step is a stable contract.
@@ -85,11 +86,14 @@ class Service:
             "keyed": self.driver.settings.keyed,
             "settings": self.driver.settings.redacted(),
             "vocabulary": self.driver.vocabulary.to_dict(),
+            "sources": [s.name
+                        for s in self.driver.observation_sources()],
         })
 
     def schemas(self, body=None):
-        from .states import SCREEN_SCHEMA, CLI_SCHEMA
-        return _ok({"schemas": [SCREEN_SCHEMA.to_dict(), CLI_SCHEMA.to_dict()]})
+        from .states import SCREEN_SCHEMA, CLI_SCHEMA, DOM_SCHEMA
+        return _ok({"schemas": [SCREEN_SCHEMA.to_dict(), CLI_SCHEMA.to_dict(),
+                                DOM_SCHEMA.to_dict()]})
 
     def vocabulary(self, body=None):
         return _ok({"vocabulary": self.driver.vocabulary.to_dict()})
@@ -99,11 +103,21 @@ class Service:
         target = body.get("target")
         if not target:
             return _wrapped(400, {"ok": False, "error": "target is required"})
-        schema = self._schema_for(body.get("schema"))
+        resolved = self._resolve_target(body.get("schema"))
+        if isinstance(resolved, dict):
+            return _wrapped(400, {"ok": False, **resolved})
+        target_class, schema = resolved
         consent = self._consent_for(body.get("consent"))
         try:
             result = self.driver.step(
-                self._target_for(body), schema=schema, consent=consent,
+                Target(target, target_class), schema=schema, consent=consent,
+                # The host's id, carried rather than replaced. It is not a
+                # new wire field -- the frozen adapter has always sent one --
+                # but it was being dropped here and the driver minted its
+                # own, which left the audit chain unjoinable to the caller's
+                # own log after the fact. Untrusted, so it is used only as an
+                # opaque label and never as a path or a filename.
+                step_id=body.get("step_id") or None,
                 prefer=tuple(body.get("prefer") or ()),
                 require_stable=bool(body.get("require_stable", True)),
                 # No new wire field: `params` already means "the parameter
@@ -123,27 +137,33 @@ class Service:
         # decision.
         return _wrapped(200, result.to_dict())
 
-    def _schema_for(self, name):
-        from .states import CLI_SCHEMA, SCREEN_SCHEMA
-        if not name or name in ("screen", "gui", "dom"):
-            return SCREEN_SCHEMA
-        if name == "cli":
-            return CLI_SCHEMA
-        return None
+    def _resolve_target(self, name):
+        """Bind one wire ``schema`` name to a target class and a schema.
 
-    def _target_for(self, body):
-        """The target, with its class derived from the *existing* schema field.
+        **An absent or unknown name is refused.** It is not defaulted.
 
-        No new wire field. ``schema`` is already in the contract and already
-        distinguishes ``cli`` from ``dom`` and ``gui``, so reading it more
-        precisely costs nothing and changes nothing. The gain is that a
-        caller asking for ``dom`` now gets a capture that structurally
-        cannot come from a screenshot.
+        The earlier version resolved ``None`` to the screen schema while
+        leaving the target class undeclared, and an undeclared class permits
+        any source to answer with pixels last. So the one request a caller
+        makes without thinking was the one request that could reach the
+        vision tier and the strongest structured tier at the same time. There
+        is no default that fixes this -- any of the four declared classes
+        would mean silently observing a different machine than the caller
+        named, or spending money -- so the honest answer is to ask.
+
+        One lookup binds the class and its schema together, because two maps
+        over the same strings is how they came to disagree.
         """
-        from .perception import DOM, GUI, CLI, Target
-        name = (body.get("schema") or "").strip().lower()
-        declared = {CLI: CLI, DOM: DOM, "gui": GUI, "screen": GUI}.get(name)
-        return Target(body.get("target"), declared)
+        from .states import WIRE_TARGETS
+        declared = WIRE_TARGETS
+        if name is None or not str(name).strip():
+            return {"error": "schema is required; declare one of "
+                             f"{sorted(declared)}"}
+        key = str(name).strip().lower()
+        if key not in declared:
+            return {"error": f"unknown schema {name!r}; declared schemas are "
+                             f"{sorted(declared)}"}
+        return declared[key]
 
     def _consent_for(self, body):
         """The consent for this request, bound to one ``(action, params)``.
