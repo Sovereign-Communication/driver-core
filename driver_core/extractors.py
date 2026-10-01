@@ -32,6 +32,7 @@ from . import transport
 from .budget import UNAVAILABLE
 from .consensus import Vote
 from .errors import SchemaError
+from .perception import VISION_CLASS
 from .schema import validate_state
 
 #: Instruction handed to a vision model. Deliberately instructs the model to
@@ -74,6 +75,11 @@ class StructuredExtractor:
     always produces the same observation, which means a disagreement between
     two structured extractors is a bug in the reader rather than a genuine
     difference of opinion -- and is worth surfacing loudly.
+
+    This is the class that makes the three structured target classes work at
+    all. It is free, so a run that never leaves this tier never spends
+    anything, which is the practical payoff of the CLI -> MCP -> DOM ordering
+    rather than an aesthetic argument about it.
     """
 
     deterministic = True
@@ -102,11 +108,22 @@ class StructuredExtractor:
 class ModelExtractor:
     """Vision extraction: one model, one opinion, charged honestly.
 
+    The last resort, and the only extractor here that costs money or can be
+    wrong in a way code cannot check. Three of the four target classes never
+    reach it, and that is enforced by which pool a target selects rather than
+    by this class refusing to help -- see
+    :meth:`ExtractorPool.for_target`.
+
     Runs in its own try/except so a provider that hangs, rate-limits, or
     returns a refusal becomes one failed slot rather than a failed round.
     """
 
     deterministic = False
+
+    #: The target class this extractor can answer. Declared rather than
+    #: inferred, so a pool can be asked which class it serves without
+    #: inspecting the objects in it.
+    serves = (VISION_CLASS,)
 
     def __init__(self, slot, model, *, endpoint, api_key, transport_module=None,
                  timeout=90):
@@ -225,14 +242,37 @@ class ExtractorPool:
     number of extractors is small, the cost is already the dominant cost, and
     a serial pool produces a deterministic ordering of records for the audit
     log, which is worth more here than the wall-clock saving.
+
+    A pool declares the target classes it serves, and
+    :meth:`refuses_class` is the structural half of "three of the four target
+    classes never reach the vision tier": a vision pool handed a ``dom``
+    capture returns no votes rather than billing for an opinion nobody asked
+    for.
     """
 
-    def __init__(self, extractors):
+    def __init__(self, extractors, *, serves=()):
         self.extractors = list(extractors)
+        self.serves = tuple(serves)
 
     @property
     def size(self):
         return len(self.extractors)
+
+    def refuses_class(self, target_class):
+        """Whether this pool declines to answer ``target_class``.
+
+        ``None`` -- an undeclared target -- is always answered. A pool that
+        declares nothing is a pool that serves everything, which is the
+        historical behaviour and the reason the declaration is optional.
+        """
+        if not self.serves:
+            return False
+        return target_class is not None and target_class not in self.serves
+
+    def for_target(self, target):
+        """This pool, or ``None`` if it does not serve the target's class."""
+        target_class = getattr(target, "target_class", None)
+        return None if self.refuses_class(target_class) else self
 
     def run(self, capture, schema):
         """Return one Vote per extractor. Never raises for a slot failure."""

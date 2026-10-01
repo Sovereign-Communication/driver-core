@@ -13,6 +13,7 @@ run. Getting these wrong does not break the system -- it makes it
 needlessly trigger-happy, and an operator who learns to ignore spurious
 disagreements has lost the signal entirely.
 """
+from .perception import CLI, DOM, GUI, MCP
 from .schema import (
     BOOLEAN, CASED, EXACT, OPTIONAL, REQUIRED, Field, Schema,
 )
@@ -92,3 +93,23 @@ SCHEMAS_BY_TARGET = {
     "dom": SCREEN_SCHEMA,
     "mcp": CLI_SCHEMA,
 }
+
+#: Which schema serves each declared target class. Declared next to the
+#: schemas rather than guessed in the driver, because "a DOM target and a GUI
+#: target extract the same fields" is a real statement about the product and
+#: belongs in the module that owns the declarations.
+SCHEMA_BY_CLASS = {
+    CLI: CLI_SCHEMA,
+    MCP: CLI_SCHEMA,
+    DOM: SCREEN_SCHEMA,
+    GUI: SCREEN_SCHEMA,
+}
+
+#: Which target classes are answerable without a vision extractor.
+#:
+#: This is the load-bearing list for cost. A ``cli``, ``mcp`` or ``dom``
+#: target that resolved to a model extractor would mean paying to have a
+#: lossy rendering described when the state was already available exactly --
+#: and paying N times, because extraction is a pool. It is declared here so
+#: it can be asserted against, not just asserted in a comment.
+FREE_CLASSES = (CLI, MCP, DOM)

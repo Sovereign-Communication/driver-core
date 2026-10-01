@@ -113,14 +113,21 @@ class Driver:
 
     def __init__(self, *, settings=None, budget=None, audit=None,
                  vocabulary=DEFAULT_VOCABULARY, pool=None, jev=None,
-                 executor=None, sources=(), screen=None):
+                 executor=None, sources=(), screen=None, pools=None):
         self.settings = settings or load_settings()
         self.budget = budget or Budget(self.settings.run_ceiling_usd,
                                        step_ceiling_usd=self.settings.step_ceiling_usd)
         self.audit = audit or AuditLog(
             self.settings.audit_path or default_audit_path())
         self.vocabulary = vocabulary
+        #: The fallback pool, used for a target whose class is undeclared.
         self.pool = pool or ExtractorPool([])
+        #: Pools keyed by declared target class. This is where "three of the
+        #: four classes never reach the vision tier" is enforced on the
+        #: extraction side: a class is only ever handed the pool that
+        #: declared it, so a vision pool is not a candidate for a ``dom``
+        #: target rather than merely being discouraged.
+        self.pools = dict(pools or {})
         self.sources = list(sources)
         self.screen = screen
 
@@ -170,7 +177,7 @@ class Driver:
         self.audit.append("capture", step_id=step_id, **capture.summary())
 
         # 2 + 3. extract and tally
-        votes = self.pool.run(capture, schema)
+        votes = self._pool_for(capture).run(capture, schema)
         agreement = tally(votes, schema, quorum=self.settings.quorum,
                           min_agreement=self.settings.min_agreement)
         receipt = agreement.receipt(schema.identity(), step_id)
@@ -248,10 +255,30 @@ class Driver:
                           cost=agreement.cost + decision.cost)
 
     def _capture(self, target, prefer):
+        """One capture, through the ordered tier chain.
+
+        ``sources`` and ``screen`` are one list on purpose. They used to be
+        two arguments, with the screen as a special case bolted on beside the
+        structured sources, and that shape is what let a screen capture be
+        treated as a peer of a CLI probe rather than as the last resort it
+        is. One ordered list, filtered by target class, is the guarantee.
+        """
         sources = list(self.sources)
         if self.screen is not None:
             sources.append(self.screen)
         return select_capture(target, sources, prefer=prefer)
+
+    def _pool_for(self, capture):
+        """The extractor pool for this capture's target class.
+
+        Falls back to the undeclared-class pool. Refusing here rather than
+        downstream means the "no vision for a structured class" rule holds
+        even when a caller wires an unusually generous pool map.
+        """
+        target_class = getattr(capture, "target_class", None)
+        if target_class is not None and target_class in self.pools:
+            return self.pools[target_class]
+        return self.pool
 
     def _stop(self, step_id, stopped_at, reason, detail, **kwargs):
         self.audit.append("refusal", step_id=step_id, stopped_at=stopped_at,
