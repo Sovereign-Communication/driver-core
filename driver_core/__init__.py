@@ -1,6 +1,16 @@
 """driver-core: verified extraction -> Jev decision -> deterministic action.
 
-Version note: ``3.0.0`` makes the perception tiers reachable from the product,
+Version note: ``3.1.0`` gives each fact one owner. Three of them had two: the
+settings and the driver both said which perception tiers were live (so
+``/health`` carried the list twice -- the ``settings.sources`` duplicate is
+gone and the top-level ``sources`` is the answer), the driver held its
+sources and its screen source as two fields reconciled by a method every
+caller had to remember, and "what does this wire ``schema`` mean" was a bare
+lookup in the CLI and a lookup-or-refuse in the service. All three now have a
+single home, described in ``docs/design.md``. ``POST /step`` is unchanged:
+same fields, same ``STOP_REASONS``, same ``StepResult.to_dict()``.
+
+``3.0.0`` made the perception tiers reachable from the product,
 and closes the one request that could reach the strongest tier by accident.
 
 * **Declared sources are live.** ``DRIVER_CLI_COMMAND``,
@@ -30,4 +40,4 @@ previously stood for "every mutating action" was removed from this package's
 vocabulary of grants. The wire contract did not change then either.
 """
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"

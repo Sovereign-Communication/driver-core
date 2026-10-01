@@ -123,6 +123,30 @@ WIRE_TARGETS = {
     "screen": (GUI, SCREEN_SCHEMA),
 }
 
+
+def resolve_wire_target(name):
+    """Bind one wire ``schema`` name to its target class and schema.
+
+    The single place that rule lives, so the CLI and the service cannot
+    answer the same question two ways -- which they did, one defaulting and
+    one refusing. The refusals are :class:`~driver_core.errors.PerceptionUnavailable`,
+    chosen because this is the *caller's* declaration that is wrong, not a
+    perception failure and not a malformed schema; a service turns that into
+    a 400 and a CLI prints it, and neither has to re-derive the rule or
+    re-word it differently.
+    """
+    from .errors import PerceptionUnavailable
+
+    if name is None or not str(name).strip():
+        raise PerceptionUnavailable(
+            f"schema is required; declare one of {sorted(WIRE_TARGETS)}")
+    key = str(name).strip().lower()
+    if key not in WIRE_TARGETS:
+        raise PerceptionUnavailable(
+            f"unknown schema {name!r}; declared schemas are "
+            f"{sorted(WIRE_TARGETS)}")
+    return WIRE_TARGETS[key]
+
 #: Which target classes are answerable without a vision extractor.
 #:
 #: This is the load-bearing list for cost. A ``cli``, ``mcp`` or ``dom``

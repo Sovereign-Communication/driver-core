@@ -4,6 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "driver-core"
+# 3.1.0: each fact has one owner. The settings and the driver no longer both
+# answer "which perception tiers are live" -- `/health` drops the
+# `settings.sources` duplicate and its top-level `sources` is the answer -- the
+# driver holds one list rather than a list plus a separate screen field, and
+# "what does this wire `schema` mean" is decided in one place instead of
+# separately in the CLI and the service. POST /step is unchanged: same fields,
+# same STOP_REASONS, same StepResult.to_dict().
 # 3.0.0: the perception tiers are reachable from the product. Sources are
 # registered from declared DRIVER_* settings (DRIVER_CLI_COMMAND,
 # DRIVER_MCP_COMMAND + DRIVER_MCP_TOOL, DRIVER_DOM_URL, DRIVER_SCREEN), and an
@@ -12,7 +19,7 @@ name = "driver-core"
 # StepResult.to_dict() are byte-identical to 2.x -- but a host that omitted
 # `schema` used to receive a 200 built on an *undeclared* target class, and an
 # undeclared class permits any source to answer with pixels last.
-version = "3.0.0"
+version = "3.1.0"
 description = "Verified extraction -> Jev decision -> deterministic action, for driving a local machine safely."
 readme = "README.md"
 requires-python = ">=3.9"

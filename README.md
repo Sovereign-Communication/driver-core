@@ -380,9 +380,11 @@ in flight, and it must never read another project's keys or state.
 The bottom five are the declared perception sources: `DRIVER_CLI_COMMAND`
 enables the `cli` tier, `DRIVER_MCP_COMMAND` with `DRIVER_MCP_TOOL` the `mcp`
 tier (both, or neither), `DRIVER_DOM_URL` the `dom` tier, and `DRIVER_SCREEN`
-the vision tier. Each is off unless set, `health` reports which are live, and
-none is inferred from another's presence. See
-[Declaring a source](#declaring-a-source).
+the vision tier. Each is off unless set, none is inferred from another's
+presence, and `health` reports the one list the driver actually holds rather
+than a second list derived from the same settings. See
+[Declaring a source](#declaring-a-source) and
+[Where each fact is owned](docs/design.md#where-each-fact-is-owned).
 
 ## Integrating into a host project
 
@@ -460,7 +462,7 @@ Before pointing this at a real machine:
 ## Development
 
 ```bash
-python -m unittest discover -s tests -t .    # 291 hermetic tests
+python -m unittest discover -s tests -t .    # 295 hermetic tests
 ruff check driver_core tests tools
 python tools/tier_order_run.py               # the tier chain, live
 python tools/live_action_run.py              # a declared action, live

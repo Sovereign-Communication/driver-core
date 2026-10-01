@@ -21,11 +21,12 @@ from driver_core.audit import MemoryAuditLog
 from driver_core.config import ConfigError, load_settings
 from driver_core.driver import Driver
 from driver_core.errors import PerceptionUnavailable, SchemaError
-from driver_core.perception import CLI, DOM, GUI, MCP, Target
+from driver_core.extractors import ExtractorPool
+from driver_core.perception import CLI, DOM, GUI, MCP, StructuredSource, Target
 from driver_core.schema import validate_state
 from driver_core.server import Service
 from driver_core.states import (
-    CLI_SCHEMA, DOM_SCHEMA, SCREEN_SCHEMA, WIRE_TARGETS,
+    CLI_SCHEMA, DOM_SCHEMA, SCREEN_SCHEMA, WIRE_TARGETS, resolve_wire_target,
 )
 from driver_core.wiring import configured_pools, configured_sources, parse_argv
 
@@ -67,22 +68,35 @@ class DefaultsTests(unittest.TestCase):
         driver = _driver(settings=_settings(cli_command="echo hi"))
         self.assertIsNone(driver.screen)
         self.assertNotIn(GUI, driver.pools)
-        self.assertNotIn(GUI, driver.settings.declared_sources())
+        self.assertNotIn("screen", [s.name for s in driver.sources])
 
     def test_a_declared_screen_source_is_consulted_once_not_twice(self):
-        """``sources`` and ``screen`` are two handles onto one set.
+        """The screen source is in the one list, and ``screen`` reads it back.
 
-        A driver built from ``DRIVER_SCREEN`` already has a screen source in
-        its declared set, so also appending ``self.screen`` would capture the
-        same pixels twice on every step and report the tier twice on
-        ``/health``. The regression test is the count.
+        ``sources`` and ``screen`` used to be two handles onto the same set,
+        reconciled by a method that had to be called from everywhere. Now
+        there is one list and ``screen`` is derived from it, so a step cannot
+        capture the same pixels twice and ``/health`` cannot report the tier
+        twice. The regression test is the count.
         """
         driver = _driver(settings=_settings(screen_enabled=True))
-        self.assertEqual([s.name for s in driver.observation_sources()],
-                         ["screen"])
+        self.assertEqual([s.name for s in driver.sources], ["screen"])
         self.assertIs(driver.screen, driver.sources[0])
         self.assertEqual(Service(driver=driver, token="t").health()["sources"],
                          ["screen"])
+
+    def test_an_explicit_screen_source_joins_the_one_list(self):
+        """A caller registering its own screen source still gets it, once."""
+        screen = StructuredSource("screen", lambda ref: {"window_title": "x"},
+                                  serves=("gui",))
+        driver = _driver(settings=_settings(cli_command="echo hi"),
+                         sources=[StructuredSource("cli", lambda ref: None)],
+                         screen=screen)
+        self.assertEqual([s.name for s in driver.sources], ["cli", "screen"])
+        self.assertIs(driver.screen, screen)
+        # Naming the same object in both places registers it once, not twice.
+        both = _driver(sources=[screen], screen=screen)
+        self.assertEqual(both.sources, [screen])
 
 
 class TierIsolationTests(unittest.TestCase):
@@ -97,11 +111,13 @@ class TierIsolationTests(unittest.TestCase):
         }
         for expected, settings in cases.items():
             with self.subTest(tier=expected):
-                self.assertEqual(settings.declared_sources(), [expected])
+                self.assertEqual([s.name for s in configured_sources(settings)],
+                                 [expected])
 
     def test_an_mcp_command_without_a_tool_enables_nothing(self):
         """Half a declaration is not a declaration."""
-        self.assertEqual(_settings(mcp_command="srv --x").declared_sources(), [])
+        self.assertEqual(configured_sources(_settings(mcp_command="srv --x")),
+                         [])
 
     def test_configured_sources_follow_the_declared_tier_order(self):
         settings = _settings(screen_enabled=True, dom_url="https://e.invalid/r",
@@ -114,7 +130,6 @@ class PoolWiringTests(unittest.TestCase):
 
     def _pools(self, **kwargs):
         return configured_pools(_settings(**kwargs), budget=None, audit=None)
-
     def test_structured_classes_get_free_pools(self):
         pools = self._pools()
         self.assertEqual(sorted(pools), [CLI, DOM, MCP])
@@ -139,6 +154,20 @@ class PoolWiringTests(unittest.TestCase):
                 self.assertEqual(structured[CLI].size, quorum)
                 vision = self._pools(quorum=quorum, screen_enabled=True)
                 self.assertEqual(vision[GUI].size, quorum)
+
+    def test_caller_supplied_pools_are_the_only_pools(self):
+        """One owner per collaborator: passing ``pools`` replaces, not merges.
+
+        The declared pools used to sit underneath whatever the caller passed
+        unless all three constructor arguments were supplied, so the same
+        ``pools={}`` meant "the declared ones" or "none" depending on the
+        other arguments. Replace is the only version of this that can be
+        stated in one sentence.
+        """
+        only_dom = {DOM: ExtractorPool([], serves=(DOM,))}
+        driver = _driver(settings=_settings(screen_enabled=True), pools=only_dom)
+        self.assertEqual(sorted(driver.pools), [DOM])
+        self.assertEqual(_driver(pools={}).pools, {})
 
 
 class CommandParsingTests(unittest.TestCase):
@@ -205,6 +234,29 @@ class DomSchemaTests(unittest.TestCase):
         self.assertEqual(WIRE_TARGETS["cli"], (CLI, CLI_SCHEMA))
         self.assertEqual(WIRE_TARGETS["mcp"], (MCP, CLI_SCHEMA))
         self.assertEqual(WIRE_TARGETS["screen"], WIRE_TARGETS["gui"])
+
+    def test_the_wire_table_is_resolved_by_one_rule_for_both_surfaces(self):
+        """One implementation, so the CLI and the service cannot disagree.
+
+        The service turns a refusal into a 400 and the CLI prints it; neither
+        re-derives the rule, so "must this be declared?" is decided once.
+        """
+        for name, expected in WIRE_TARGETS.items():
+            with self.subTest(name=name):
+                self.assertEqual(resolve_wire_target(name), expected)
+        self.assertEqual(resolve_wire_target("  CLI "), (CLI, CLI_SCHEMA))
+
+    def test_the_rule_refuses_what_it_cannot_bind(self):
+        for bad in (None, "", "   ", "banana", "teleport", 17):
+            with self.subTest(bad=bad):
+                with self.assertRaises(PerceptionUnavailable):
+                    resolve_wire_target(bad)
+        with self.assertRaises(PerceptionUnavailable) as ctx:
+            resolve_wire_target(None)
+        self.assertIn("schema is required", str(ctx.exception))
+        with self.assertRaises(PerceptionUnavailable) as ctx:
+            resolve_wire_target("banana")
+        self.assertIn("unknown schema", str(ctx.exception))
 
 
 class RefusalQualityTests(unittest.TestCase):
