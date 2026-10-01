@@ -7,12 +7,11 @@ name = "driver-core"
 # 3.0.0: the perception tiers are reachable from the product. Sources are
 # registered from declared DRIVER_* settings (DRIVER_CLI_COMMAND,
 # DRIVER_MCP_COMMAND + DRIVER_MCP_TOOL, DRIVER_DOM_URL, DRIVER_SCREEN), and an
-# absent or unrecognised `schema` on POST /step is now a 400 rather than a
-# silent default. Nothing was added to the response -- STOP_REASONS and
+# absent or unrecognised `schema` on POST /step is a 400 rather than a silent
+# default. Nothing was added to the response -- STOP_REASONS and
 # StepResult.to_dict() are byte-identical to 2.x -- but a host that omitted
 # `schema` used to receive a 200 built on an *undeclared* target class, and an
-# undeclared class permits any source to answer with pixels last. That
-# request now refuses instead. See the 3.0.0 release notes.
+# undeclared class permits any source to answer with pixels last.
 version = "3.0.0"
 description = "Verified extraction -> Jev decision -> deterministic action, for driving a local machine safely."
 readme = "README.md"

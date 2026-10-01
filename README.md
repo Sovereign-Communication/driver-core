@@ -147,15 +147,8 @@ and more auditable than splicing a caller string into one.
 ### Declaring a source
 
 The tiers are useless unless something registers them, so the shipped CLI and
-service read them out of the same `DRIVER_*` namespace as everything else:
-
-| Setting | Tier it enables |
-|---|---|
-| `DRIVER_CLI_COMMAND` | `cli` — a command, tokenised and run |
-| `DRIVER_MCP_COMMAND` + `DRIVER_MCP_TOOL` | `mcp` — both, or neither |
-| `DRIVER_DOM_URL` | `dom` |
-| `DRIVER_SCREEN` | `screen` — the vision tier, and the only thing that spends |
-
+service read them out of the same `DRIVER_*` namespace as everything else —
+one setting per tier, each listed in [Configuration](#configuration).
 ```bash
 $ DRIVER_CLI_COMMAND='python -c "import sys; print(sys.argv[1])"' \
       driver-core --json step --schema cli "my-app"
@@ -201,6 +194,11 @@ Two rules make this safe to expose as configuration at all:
   string must not be able to become code — that is the one rule
   `driver_core.osal` exists to enforce, and a redirect written into
   `DRIVER_CLI_COMMAND` is a filename argument rather than a redirection.
+- **A pool is sized by the quorum it has to satisfy.** `DRIVER_QUORUM` is how
+  many independent opinions you want, so it is how many extractors a declared
+  source gets. A pool smaller than the quorum could never agree, and a
+  declared driver that refused every step would be a tier chain that exists
+  and is still unreachable.
 
 A `dom` target is validated against its own schema (`window_title`, plus
 optional `visible_text`) rather than the screen schema, because a document
@@ -379,9 +377,12 @@ in flight, and it must never read another project's keys or state.
 | `DRIVER_DOM_URL` | — | declare the `dom` tier |
 | `DRIVER_SCREEN` | `false` | declare the vision tier; the only source that costs money |
 
-The bottom five are the declared perception sources. Each is off unless set,
-`health` reports which are live, and none of them is inferred from another's
-presence. See [Declaring a source](#declaring-a-source).
+The bottom five are the declared perception sources: `DRIVER_CLI_COMMAND`
+enables the `cli` tier, `DRIVER_MCP_COMMAND` with `DRIVER_MCP_TOOL` the `mcp`
+tier (both, or neither), `DRIVER_DOM_URL` the `dom` tier, and `DRIVER_SCREEN`
+the vision tier. Each is off unless set, `health` reports which are live, and
+none is inferred from another's presence. See
+[Declaring a source](#declaring-a-source).
 
 ## Integrating into a host project
 
@@ -450,7 +451,7 @@ pointing this at a real machine:
 ## Development
 
 ```bash
-python -m unittest discover -s tests -t .    # 283 hermetic tests
+python -m unittest discover -s tests -t .    # 276 hermetic tests
 ruff check driver_core tests tools
 python tools/tier_order_run.py               # the tier chain, live
 python tools/live_action_run.py              # a declared action, live

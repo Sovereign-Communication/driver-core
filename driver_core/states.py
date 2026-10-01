@@ -84,16 +84,6 @@ CLI_SCHEMA = Schema(
     ],
 )
 
-#: Schemas by target class, so a caller picks one and does not have to know
-#: which module declared it.
-SCHEMAS_BY_TARGET = {
-    "gui": SCREEN_SCHEMA,
-    "screen": SCREEN_SCHEMA,
-    "cli": CLI_SCHEMA,
-    "dom": SCREEN_SCHEMA,
-    "mcp": CLI_SCHEMA,
-}
-
 #: What a fetched document can honestly supply. Separate from
 #: :data:`SCREEN_SCHEMA` because a document genuinely cannot report the
 #: foreground application's name or whether a modal dialog is up -- and
@@ -115,29 +105,16 @@ DOM_SCHEMA = Schema(
     ],
 )
 
-#: Which schema serves each declared target class. Declared next to the
-#: schemas rather than guessed in the driver, because "a DOM target and a GUI
-#: target extract different fields" is a real statement about the product and
-#: belongs in the module that owns the declarations.
-SCHEMA_BY_CLASS = {
-    CLI: CLI_SCHEMA,
-    MCP: CLI_SCHEMA,
-    DOM: DOM_SCHEMA,
-    GUI: SCREEN_SCHEMA,
-}
-
 #: The names the service accepts on the wire, each bound to a target class
-#: **and** its schema in one place.
-#:
-#: Two parallel maps over the same string domain is how a request ends up
-#: with the screen schema and an undeclared class -- and an undeclared class
-#: permits any source, which quietly reopens the vision tier. Binding them
-#: together means a name is either known completely or refused.
+#: **and** its schema in one place. This is the only map over these names: a
+#: second one is what let a request arrive with a schema and a class that
+#: disagreed, and an undeclared class permits any source to answer -- which
+#: quietly reopens the vision tier.
 #:
 #: The table is the whole set: there is deliberately no default for an absent
-#: name. A default would have to be one of the four declared classes, and
-#: whichever it was would silently observe a different machine than the
-#: caller asked for -- or spend money. So the service asks instead.
+#: name, because a default would have to be one of the four declared classes
+#: and whichever it was would silently observe a different machine than the
+#: caller asked for. So the service asks instead.
 WIRE_TARGETS = {
     "cli": (CLI, CLI_SCHEMA),
     "mcp": (MCP, CLI_SCHEMA),

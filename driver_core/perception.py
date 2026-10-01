@@ -596,13 +596,10 @@ def select_capture(target, sources, *, prefer=()):
     whether the screen tier was *excluded by class* or merely declined. Those
     are different operational problems: the first means the caller declared
     the wrong class, and the second means the machine genuinely had nothing.
-
-    The three refusals below are distinguished by that distinction rather
-    than by tone. A declared target with no candidate at all had *nothing
-    tried*, which is a different fact from "everything declined" and reports
-    itself as such -- because an operator who configured a CLI source and
-    asked for pixels has a wiring mistake, not an observation failure, and
-    the message has to say which.
+    A declared class that nothing serves is a third fact again -- *nothing was
+    tried* -- and an operator who configured a CLI source and asked for
+    pixels has a wiring mistake rather than an observation failure, so the
+    message says which of the three happened.
     """
     target = as_target(target)
     candidates = [s for s in sources if s.can_serve(target)]
@@ -640,8 +637,8 @@ def select_capture(target, sources, *, prefer=()):
         # fix is to configure the class they actually asked for.
         note = ""
         if excluded:
-            note = (f"; excluded because they serve another class: "
-                    f"{sorted(set(excluded))}")
+            note += (f"; excluded because they serve another class: "
+                     f"{sorted(set(excluded))}")
         if "screen" in excluded:
             note += (f" The screen tier serves {VISION_CLASS!r} only, so it was "
                      f"therefore not reached.")

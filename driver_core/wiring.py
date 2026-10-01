@@ -5,26 +5,19 @@ built, wired to each other, and provable -- and unreachable. A default
 ``Driver()`` carried no sources, so ``driver-core step`` answered ``Tried:
 none`` and every ``POST /step`` ended in ``no_capture``. The chain worked
 only for a caller writing Python by hand, which makes it a library feature
-rather than a product one.
-
-So this is the one place that reads the declared sources out of
-:class:`~driver_core.config.Settings` and builds the live objects. Keeping it
-here rather than in :mod:`driver_core.driver` is deliberate on two counts:
-:class:`~driver_core.config.Settings` stays a pure declaration with no
-perception imports, and a reader looking for "what can this driver observe"
-finds it in one file instead of inferring it from a constructor.
+rather than a product one. It is also the one place that reads declared
+sources out of :class:`~driver_core.config.Settings`, so a reader looking
+for "what can this driver observe" finds it in one file.
 
 Two rules the wiring holds to, both of which are the reason it exists:
 
 * **A source is off unless it was named.** Nothing is inferred from another
-  setting's presence. An operator who sets a CLI command gets the CLI tier
-  and not the screen tier, and the vision tier is never enabled by anything
-  other than its own explicit switch.
-* **Commands are tokenised, never executed through a shell.**
-  :func:`parse_argv` uses :mod:`shlex` for splitting only -- no globbing, no
-  variable expansion, no redirection. A setting that reached a shell would be
-  the first place in this package where a configuration string could become
-  code, and the one rule :mod:`driver_core.osal` exists to prevent.
+  setting's presence, and the vision tier is never enabled by anything other
+  than its own explicit switch.
+* **Commands are tokenised, never executed through a shell.** :func:`parse_argv`
+  uses :mod:`shlex` for splitting only -- no globbing, no variable expansion,
+  no redirection. A setting that reached a shell would be the first place in
+  this package where a configuration string could become code.
 """
 import shlex
 
@@ -33,7 +26,6 @@ from .extractors import ExtractorPool, StructuredExtractor, build_vision_pool
 from .perception import (
     CLI, DOM, GUI, MCP, CliSource, DomSource, McpSource, ScreenSource,
 )
-from .states import SCHEMA_BY_CLASS
 
 
 def parse_argv(text):
@@ -63,8 +55,8 @@ def configured_sources(settings):
     Returned in the declared tier order so ``/health`` and the refusal
     messages describe the chain the way it actually runs. An unparseable
     command raises rather than being skipped: a source the operator asked
-    for and cannot run should be a loud configuration fault, not a silent
-    absence that looks identical to "not configured".
+    for and cannot run is a configuration fault, not an absence that looks
+    identical to "not configured".
     """
     sources = []
     if settings.cli_command:
@@ -75,38 +67,38 @@ def configured_sources(settings):
     if settings.dom_url:
         sources.append(DomSource(settings.dom_url))
     if settings.screen_enabled:
-        # The vision tier. Separate from the structured tiers because it is
+        # The vision tier is separate from the structured tiers because it is
         # the only one that spends money and the only one that cannot be
         # re-derived from state that was already available exactly.
         sources.append(ScreenSource())
     return sources
 
 
-def configured_pools(settings, *, budget, audit, slots=2):
+def configured_pools(settings, *, budget, audit):
     """Extractor pools keyed by the target class each one serves.
 
-    Structured pools are deterministic and free, so two slots of them give
-    the consensus tier the two independent observers it needs at no cost.
-    That is the whole practical payoff of the tier ordering: the classes that
-    can be read exactly get two opinions for nothing, and only the class that
-    cannot gets a bill.
+    Each pool is sized by the configured quorum, which is what makes the
+    declared tiers usable rather than merely present: a pool with fewer slots
+    than the quorum can never satisfy it, so a driver built from settings
+    would refuse every step with ``insufficient_agreement`` the moment an
+    operator asked for a third opinion. The structured slots are
+    deterministic and free, so the two opinions the default quorum wants cost
+    nothing -- which is the practical payoff of the tier ordering.
     """
-    pools = {}
-    for cls in (CLI, MCP, DOM):
-        schema = SCHEMA_BY_CLASS[cls]
-        pools[cls] = ExtractorPool(
-            [StructuredExtractor(f"{cls}-{i}", _declared_reader(schema))
-             for i in range(max(1, int(slots)))],
-            serves=(cls,))
+    slots = max(1, int(settings.quorum))
+    pools = {cls: ExtractorPool(
+        [StructuredExtractor(f"{cls}-{i}", _declared_reader())
+         for i in range(slots)], serves=(cls,))
+        for cls in (CLI, MCP, DOM)}
     if settings.screen_enabled:
         pools[GUI] = build_vision_pool(settings, budget=budget, audit=audit,
-                                       slots=max(1, int(slots)))
+                                       slots=slots)
     return pools
 
 
-def _declared_reader(schema):
-    """A reader that reports only what the schema declares and the payload
-    actually contains.
+def _declared_reader():
+    """A reader that reports only the schema's declared fields, and only
+    those the payload actually contains.
 
     It does not default a missing field and it does not carry an undeclared
     one through. Both are the same mistake in opposite directions: inventing
@@ -114,12 +106,11 @@ def _declared_reader(schema):
     contract. What the source genuinely cannot supply stays absent, so the
     tally reports a shortfall rather than agreement nobody observed.
     """
-    declared = frozenset(schema.field_names())
-
-    def read(capture, _schema):
+    def read(capture, schema):
         payload = capture.payload
         if not isinstance(payload, dict):
             return None
+        declared = frozenset(schema.field_names())
         return {k: v for k, v in payload.items() if k in declared}
 
     return read
