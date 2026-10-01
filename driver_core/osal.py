@@ -43,6 +43,8 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.parse
+import urllib.request
 
 from .errors import OsalError
 
@@ -104,6 +106,12 @@ def run(argv, *, cwd=None, timeout=DEFAULT_TIMEOUT, env=None, input_text=None,
     argv = list(argv)
     if not argv:
         raise ValueError("argv must not be empty")
+    if input_text is not None and not isinstance(input_text, str):
+        # Caught here rather than surfacing as an AttributeError from inside
+        # the encode() call four lines down, which reads as a bug in this
+        # module rather than as the caller's mistake.
+        raise TypeError(
+            f"input_text must be str or None, got {type(input_text).__name__}")
 
     child_env = None
     if env:
@@ -114,9 +122,14 @@ def run(argv, *, cwd=None, timeout=DEFAULT_TIMEOUT, env=None, input_text=None,
         "cwd": cwd,
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
-        "stdin": subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
         "shell": False,
     }
+    if input_text is None:
+        popen_kwargs["stdin"] = subprocess.DEVNULL
+    # When input_text is given, `input=` below installs the stdin pipe itself.
+    # Passing both is rejected by subprocess, and doing so meant the
+    # input_text path raised ValueError on every platform -- a parameter that
+    # looked like it worked and had never once been exercised.
     if platform_name() == "windows":
         popen_kwargs["creationflags"] = CREATE_NO_WINDOW
 
@@ -279,6 +292,74 @@ def disable_input_backend(platform=None):
 def input_backends():
     """Which platforms currently have a backend. For ``/health``."""
     return dict(_INPUT_BACKENDS)
+
+
+# ---- reaching the network -----------------------------------------------
+# Here for the same reason as ``run`` and ``capture_screen``: a driver that
+# fetches from two files grows two ideas about timeouts, redirects and user
+# agents, and the divergence only shows up against the one server that cares.
+#
+# Declared limits, because a default that trusts the far end is a default
+# that will eventually be wrong in front of somebody's screen:
+#
+# * the scheme is restricted to http/https, so ``file://`` cannot be used to
+#   read the local disk through a URL-shaped hole;
+# * the redirect budget is small, because a redirect loop in a local driver
+#   is a hang nobody is watching;
+# * a redirect to any other scheme is refused rather than followed.
+#
+# Refusals raise :class:`OsalError`, which is what the filesystem and input
+# sections here already raise. That type derives from ``DriverError``, so a
+# caller catching the base class is unaffected -- the network tier simply
+# stops hiding behind the generic name now that a specific one exists.
+
+MAX_REDIRECTS = 3
+FETCH_MAX_BYTES = 1 << 20
+USER_AGENT = "driver-core (perception; stdlib-only)"
+ALLOWED_SCHEMES = ("http", "https")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Count redirects instead of following them blindly."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        used = getattr(self, "_driver_core_redirects", 0)
+        if used >= MAX_REDIRECTS:
+            raise OsalError(
+                f"refusing to follow more than {MAX_REDIRECTS} redirects "
+                f"while fetching a document")
+        scheme = urllib.parse.urlparse(newurl).scheme
+        if scheme not in ALLOWED_SCHEMES:
+            raise OsalError(
+                f"refusing a redirect to {scheme!r}; only "
+                f"{list(ALLOWED_SCHEMES)} are fetched")
+        self._driver_core_redirects = used + 1
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def http_get(url, *, timeout=20, max_bytes=FETCH_MAX_BYTES):
+    """Fetch one document. Returns ``(status, text)``; raises on refusal.
+
+    A caller gets either an HTTP status and a body, or an exception naming
+    the reason. There is deliberately no "empty document, but successfully":
+    an empty body returned as a successful fetch is how a driver concludes a
+    page is blank when in fact it never arrived.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ALLOWED_SCHEMES:
+        raise OsalError(
+            f"refusing to fetch {parsed.scheme!r}; only "
+            f"{list(ALLOWED_SCHEMES)} are fetched")
+    if not parsed.netloc:
+        raise OsalError(f"{url!r} has no host to fetch from")
+
+    opener = urllib.request.build_opener(_NoRedirect)
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with opener.open(request, timeout=timeout) as response:
+        body = response.read(max_bytes)
+        status = getattr(response, "status", None) or response.getcode()
+        charset = response.headers.get_content_charset() or "utf-8"
+    return status, body.decode(charset, "replace")
 
 
 def send_input(kind, value=None, *, target=None):

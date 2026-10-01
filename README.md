@@ -50,11 +50,73 @@ the structured sources cannot answer. Most runs are therefore free,
 deterministic, and reproducible — and the vision adapter is a small, isolated,
 last-resort component rather than the core of the system.
 
+### The ordering is structural, not advisory
+
+"It tries pixels last" is easy to claim and easy to break by accident, so it
+is enforced by types instead:
+
+```python
+from driver_core.perception import DOM, CliSource, DomSource, Target
+
+capture = select_capture(
+    Target("dashboard", DOM),
+    [DomSource("https://example/report"), screen_source])
+```
+
+A `Target` carries the class it was declared to be — `cli`, `mcp`, `dom`, or
+`gui` — and every source declares which classes it serves. For a `cli`, `mcp`
+or `dom` target the screen source **is never a candidate**, so it cannot be
+called, billed, or quietly preferred. The claim becomes checkable: a source
+that would violate the ordering cannot be reached, and a test can assert it
+with a screen source that raises if touched.
+
+| class | answered by | cost |
+|---|---|---|
+| `cli` | `CliSource` — a real argv subprocess | free |
+| `mcp` | `McpSource` — real JSON-RPC over stdio | free |
+| `dom` | `DomSource` — real fetch, stdlib HTML parser | free |
+| `gui` | `ScreenSource` → vision extractors | billed |
+
+Three of the four classes never reach a vision extractor, and extraction is
+a *pool* — so the alternative is paying N times to describe a lossy rendering
+of state that was already available exactly.
+
+A bare string target is still accepted, and is deliberately weaker: an
+undeclared class permits any source, pixels last. That preserves every
+existing caller while making the strong form available to those who want it.
+
+When nothing answers, the refusal says whether the screen tier was *excluded
+by class* or merely declined — different problems, and the first has an
+obvious fix.
+
+### What each tier actually does
+
+All three structured tiers are stdlib-only, deliberately:
+
+- **`CliSource`** runs a declared command through `osal.run` and returns its
+  exit code, stdout and stderr. The target is appended as its own argv
+  element rather than substituted into the command, so a hostile target can
+  only ever be one argument.
+- **`McpSource`** speaks newline-delimited JSON-RPC to a declared child
+  process: `initialize`, `notifications/initialized`, then `tools/call`. Text
+  content blocks are **refused, not parsed** — they are the MCP equivalent of
+  reading pixels, and parsing them here would reintroduce the unreliable tier
+  at the end of a chain whose argument is that the structured tiers are not
+  guesses.
+- **`DomSource`** fetches a declared URL through `osal.http_get` and extracts
+  the title and visible text with `html.parser`. Script and style bodies are
+  dropped: they contain the words a schema asks for most often, and a vision
+  model does not read them either.
+
+The DOM target is **not** substituted into the URL. A declared URL is safer
+and more auditable than splicing a caller string into one.
+
 ## Guarantees
 
 | | |
 |---|---|
 | **A disagreement never reaches the model** | enforced in the pipeline; the test asserts the fake decision client was never called |
+| **Three of four targets never see pixels** | declared per target class; a screen source is not a candidate for `cli`, `mcp` or `dom` |
 | **Unanswered ≠ agreeing** | three distinct outcomes: `agreed`, `disagreed`, `insufficient` |
 | **Spend is refused before dispatch** | reserve → dispatch once → settle once; a call whose usage is unreadable is charged at the full estimate, never zero |
 | **No model past the action tier** | executors are named, registered, and closed; an unregistered name is a refusal, not a skip |
@@ -245,8 +307,12 @@ pointing this at a real machine:
 ## Development
 
 ```bash
-python -m unittest discover -s tests -t .    # 182 hermetic tests
+python -m unittest discover -s tests -t .    # 229 hermetic tests
 ruff check driver_core tests
+python tools/tier_order_run.py               # the tier chain, live
+python tools/live_action_run.py              # a declared action, live
+ruff check driver_core tests
+python tools/tier_order_run.py               # the tier chain, live
 ```
 
 The suite is hermetic: no network, no model, no screen, no disk. Fakes live in

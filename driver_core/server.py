@@ -103,7 +103,7 @@ class Service:
         consent = self._consent_for(body.get("consent"))
         try:
             result = self.driver.step(
-                target, schema=schema, consent=consent,
+                self._target_for(body), schema=schema, consent=consent,
                 prefer=tuple(body.get("prefer") or ()),
                 require_stable=bool(body.get("require_stable", True)),
                 # No new wire field: `params` already means "the parameter
@@ -130,6 +130,20 @@ class Service:
         if name == "cli":
             return CLI_SCHEMA
         return None
+
+    def _target_for(self, body):
+        """The target, with its class derived from the *existing* schema field.
+
+        No new wire field. ``schema`` is already in the contract and already
+        distinguishes ``cli`` from ``dom`` and ``gui``, so reading it more
+        precisely costs nothing and changes nothing. The gain is that a
+        caller asking for ``dom`` now gets a capture that structurally
+        cannot come from a screenshot.
+        """
+        from .perception import DOM, GUI, CLI, Target
+        name = (body.get("schema") or "").strip().lower()
+        declared = {CLI: CLI, DOM: DOM, "gui": GUI, "screen": GUI}.get(name)
+        return Target(body.get("target"), declared)
 
     def _consent_for(self, body):
         """The consent for this request, bound to one ``(action, params)``.
