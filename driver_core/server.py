@@ -29,6 +29,7 @@ import json
 import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import __version__
 from .config import load_settings
 from .driver import Driver
 from .errors import DriverError, PerceptionUnavailable
@@ -76,13 +77,33 @@ class Service:
 
     def __init__(self, driver=None, *, token=None):
         self.driver = driver or Driver(settings=load_settings())
+        # Three ways to end up with a token, in descending precedence: an
+        # explicit argument (a library caller holding its own), the operator's
+        # DRIVER_TOKEN, and a generated one. The last is the default because a
+        # per-process token is right for an in-process driver and wrong for a
+        # host that has to present it -- which is why the middle one exists.
+        #
+        # Only the *configured* token is policed, and it was policed where it
+        # is read (:func:`driver_core.config.validated_token`). An explicit
+        # argument is a different trust domain: that caller wrote the token in
+        # the same breath as the code that presents it and can already reach
+        # every executor, so a length check there buys nothing and would only
+        # make the library awkward to drive from a test.
+        if token is None:
+            token = self.driver.settings.token
         self.token = token or secrets.token_urlsafe(24)
 
     # -- routes ---------------------------------------------------------
 
     def health(self, body=None):
+        # The version is here so a host can tell what it is talking to before
+        # it posts a request that means something different in another
+        # release. The token is deliberately not: it is a credential, it
+        # belongs in a header the caller already holds, and this endpoint is
+        # reachable by anything that can open a loopback socket.
         return _ok({
             "status": "up",
+            "version": __version__,
             "keyed": self.driver.settings.keyed,
             "settings": self.driver.settings.redacted(),
             "vocabulary": self.driver.vocabulary.to_dict(),
@@ -302,14 +323,36 @@ class Handler(BaseHTTPRequestHandler):
         self._respond(outcome["status"], outcome.get("body", outcome))
 
 
-def serve(host=None, port=None, *, service=None, block=True):
-    """Bind loopback and serve. Returns ``(server, service)``."""
+def serve(host=None, port=None, *, service=None, block=True, announce=None):
+    """Bind loopback and serve. Returns ``(server, service)``.
+
+    ``port=0`` is honoured as the operating system intends it and asks for an
+    ephemeral port. The obvious ``port or settings.port`` would treat 0 as
+    unset and hand back the default instead, which silently costs a caller
+    the thing it asked for -- two services that meant to coexist would
+    collide, and the second would fail with a bind error naming a port nobody
+    chose. ``None`` means "not specified"; 0 is a value.
+
+    ``host`` keeps the opposite rule, deliberately: an empty host is not a
+    value a caller can mean, and binding it would listen on every interface,
+    which is the one thing this server promises not to do. So ``""`` falls
+    back to the configured loopback address. The asymmetry is the point --
+    0 is a real port, ``""`` is not a real host.
+
+    ``announce`` is called with the bound ``(host, port)`` once the socket is
+    listening, which is the only moment the answer is knowable: with an
+    ephemeral port the caller cannot know it beforehand, and echoing the
+    arguments it passed is how this used to report ``http://None:8791``.
+    """
     settings = service.driver.settings if service else load_settings()
     host = host or settings.host
-    port = port or settings.port
+    if port is None:
+        port = settings.port
     service = service or Service(Driver(settings=settings))
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.service = service
+    if announce is not None:
+        announce(httpd.server_address[:2])
     if block:
         try:
             httpd.serve_forever()

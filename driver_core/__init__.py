@@ -1,5 +1,39 @@
 """driver-core: verified extraction -> Jev decision -> deterministic action.
 
+This module is the single owner of the version number. ``pyproject.toml`` reads
+it (``[tool.setuptools.dynamic]``) and ``GET /health`` reports it, so the built
+wheel, the running service and this docstring cannot drift apart.
+
+Version note: ``3.2.0`` lets a host supply the token it will present, which is
+the missing half of the REST surface. The token check has been there since the
+endpoint was, but a host could not hold a token for it: the only way to learn
+one was ``serve --print-token``, which bound the port, printed, and exited --
+handing back a credential no surviving process could present, so the service
+had to be started twice. ``DRIVER_TOKEN`` is now a declared setting; a random
+token per process remains the default when the host supplies none, which is the
+right default for a caller driving the service in-process and useless for one
+integrating over HTTP. A token that is declared blank or under
+:data:`~driver_core.config.MIN_TOKEN_LENGTH` characters is refused by name
+rather than accepted, because a service bound with a credential too weak to
+matter looks exactly like a service that is working.
+
+The token is never echoed: not in ``Settings.redacted()``, not in a ``repr``,
+and not in ``GET /health``, which is reachable by anything that can open a
+loopback socket. It belongs in a header the caller already holds. What
+``/health`` gains instead is ``version``, so a host can tell what it is talking
+to before posting a request that means something different in another release.
+
+Two defects in the same lines are fixed. ``serve(port=0)`` now asks the
+operating system for an ephemeral port; ``port or settings.port`` treated 0 as
+unset and silently handed back 8791 instead. And ``serve`` announces the address
+it actually bound rather than the arguments it was given, which is how an
+operator was told the service was on ``http://None:8791`` -- printed by the one
+branch that was not listening, while the branch that was listening said nothing.
+
+``STOP_REASONS``, the eleven keys of
+:meth:`~driver_core.driver.StepResult.to_dict`, and the field set of the request
+body are unchanged, and so is the token check itself.
+
 Version note: ``3.1.0`` gives each fact one owner. Three of them had two: the
 settings and the driver both said which perception tiers were live (so
 ``/health`` carried the list twice -- the ``settings.sources`` duplicate is
@@ -40,4 +74,4 @@ previously stood for "every mutating action" was removed from this package's
 vocabulary of grants. The wire contract did not change then either.
 """
 
-__version__ = "3.1.0"
+__version__ = "3.2.0"

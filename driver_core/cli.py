@@ -160,12 +160,23 @@ def cmd_verify(args, driver):
 
 
 def cmd_serve(args, driver):
-    _, service = serve(args.host, args.port, service=Service(driver),
-                       block=not args.print_token)
     if args.print_token:
-        print(f"listening on http://{args.host}:{args.port}")
-        print(f"token: {service.token}")
+        # A pure query, binding nothing. It used to bind the port, print, and
+        # exit -- which produced a token no process could ever present,
+        # because the process holding it was gone and the socket closed. A
+        # host that cannot scrape stdout from a process it just started needs
+        # this to be answerable *before* anything is listening.
+        declared = driver.settings.token
+        if not declared:
+            print("serve --print-token needs a declared DRIVER_TOKEN: a "
+                  "generated token dies with the process that made it, so "
+                  "there is nothing to hand a caller.", file=sys.stderr)
+            return EXIT_ERROR
+        print(declared)
         return EXIT_OK
+    serve(args.host, args.port, service=Service(driver), block=True,
+          announce=lambda addr: print(
+              f"listening on http://{addr[0]}:{addr[1]}"))
     return EXIT_OK
 
 
@@ -225,20 +236,23 @@ def build_parser():
     srv.add_argument("--host", default=None)
     srv.add_argument("--port", type=int, default=None)
     srv.add_argument("--print-token", action="store_true",
-                     help="bind, print the token, and exit")
+                     help="print the declared DRIVER_TOKEN and exit, without "
+                          "binding; errors if no token is declared, because a "
+                          "generated one dies with this process")
     return parser
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    # Only override when the flag is actually set: passing False would
-    # clobber DRIVER_DRY_RUN from the environment, which is a quieter bug
-    # than it looks -- the flag would appear to do nothing.
-    settings = load_settings(**({"dry_run": True} if args.dry_run else {}))
     try:
-        # Inside the try: a declared source that cannot even be tokenised is a
-        # configuration fault, and it has to be reported like every other one
-        # rather than as a traceback out of the constructor.
+        # Both calls are inside the try, and that includes the settings load:
+        # a declared source that cannot even be tokenised, or a token that is
+        # blank or too short, is a configuration fault, and it has to be
+        # reported like every other one rather than as a traceback out of a
+        # constructor. Only override when the flag is actually set -- passing
+        # False would clobber DRIVER_DRY_RUN from the environment, which is a
+        # quieter bug than it looks, since the flag would appear to do nothing.
+        settings = load_settings(**({"dry_run": True} if args.dry_run else {}))
         driver = Driver(settings=settings)
         return COMMANDS[args.command](args, driver)
     except Exception as exc:
