@@ -44,11 +44,11 @@ from . import policy
 from .actions import DEFAULT_VOCABULARY
 from .audit import (
     KIND_CAPTURE, KIND_ESCALATION, KIND_EXTRACTION, KIND_REFUSAL, AuditLog,
-    required,
+    required, same_chain,
 )
 from .budget import Budget
 from .consensus import tally
-from .config import Settings, load_settings
+from .config import Settings, default_audit_path, load_settings
 from .errors import PerceptionUnavailable, VocabularyError
 from .executor import Executor
 from .executor_registry import build_driver_registry
@@ -123,8 +123,8 @@ class Driver:
                                        step_ceiling_usd=self.settings.step_ceiling_usd)
         #: Required, not optional, and not defaulted to a path. A driver
         #: runs actions, so where its chain goes is a decision its caller
-        #: makes and can see -- ``config.audit_path_for`` is the rule, and
-        #: the CLI and the service both pass it.
+        #: makes and can see -- :func:`driver_from_settings` is the pairing
+        #: the CLI and the service both use.
         self.audit = required(audit, "A Driver")
         self.vocabulary = vocabulary
 
@@ -159,6 +159,16 @@ class Driver:
         # Executors with a side effect are registered only when the operator
         # has declared this machine may be written to. A caller that builds
         # a Driver and passes no settings gets an observer.
+        #
+        # A caller that brings its own executor brings it across the same
+        # line the one built here stands on: it has to record to *this*
+        # driver's chain, or the action would land in a log of its own that
+        # nothing links to the decision that caused it. Checking only our
+        # own constructor would have left the seam beside it open, which is
+        # where an unrecorded action would actually arrive from.
+        if executor is not None:
+            same_chain(getattr(executor, "audit", None), self.audit,
+                       type(executor).__name__)
         self.executor = executor or Executor(
             vocabulary=vocabulary,
             registry=build_driver_registry(
@@ -338,5 +348,25 @@ def _params_for(action, supplied):
     return action.check_params(supplied)
 
 
+def driver_from_settings(settings=None):
+    """A driver holding the chain its own settings declare.
+
+    The pairing lives here and nowhere else. The two facts are "where does
+    this run's chain go" and "a driver that acts needs a chain", and until
+    this existed each entry point wrote both of them out: the CLI, and the
+    service twice over. Three copies of a rule is the problem this package
+    keeps removing, and leaving it here would have been removing it from one
+    file and adding it to three.
+
+    It lives beside ``Driver`` rather than in :mod:`wiring` because
+    ``driver`` already imports ``wiring``; the other direction would be a
+    cycle. Everything a caller would otherwise want to vary -- the log, the
+    collaborators, the vocabulary -- is what :class:`Driver` takes directly.
+    """
+    settings = settings or load_settings()
+    return Driver(settings=settings,
+                  audit=AuditLog(settings.audit_path or default_audit_path()))
+
+
 __all__ = ["Driver", "StepResult", "Settings", "load_settings", "Budget",
-           "AuditLog"]
+           "AuditLog", "driver_from_settings"]

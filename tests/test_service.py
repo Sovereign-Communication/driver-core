@@ -40,8 +40,13 @@ def _service(pool=None, jev=None, **over):
     pool = pool or ExtractorPool([StructuredExtractor(f"s{i}", _reader())
                                   for i in range(2)])
     jev = jev or FakeJev(action_answer("observe", confidence=0.95))
+    # One log, shared by the driver and the executor it is handed. They used
+    # to get one each, which is the thing ``Driver`` now refuses: the action
+    # record would have gone to a chain of its own, unlinked from the capture
+    # and decision that produced it.
+    chain = MemoryAuditLog()
     driver = Driver(settings=settings, budget=Budget(1.0, step_ceiling_usd=1.0),
-                    audit=MemoryAuditLog(), pool=pool, jev=jev,
+                    audit=chain, pool=pool, jev=jev,
                     # A deterministic stand-in for a screen capture. It
                     # declares the gui class explicitly, because the class is
                     # what decides whether this source may answer at all --
@@ -55,7 +60,7 @@ def _service(pool=None, jev=None, **over):
                         "driver_core.actions", fromlist=["x"]
                     ).DEFAULT_VOCABULARY,
                         registry=build_read_only_registry(), dry_run=True,
-                        audit=MemoryAuditLog()))
+                        audit=chain))
     return Service(driver, token="test-token")
 
 

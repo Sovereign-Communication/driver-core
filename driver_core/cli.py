@@ -23,9 +23,8 @@ import json
 import sys
 
 from .actions import DEFAULT_VOCABULARY
-from .audit import AuditLog
-from .config import audit_path_for, load_settings
-from .driver import Driver
+from .config import load_settings
+from .driver import driver_from_settings
 from .executor import Consent, normalise_params
 from .perception import Target
 from .server import Service, serve
@@ -254,8 +253,7 @@ def main(argv=None):
         # False would clobber DRIVER_DRY_RUN from the environment, which is a
         # quieter bug than it looks, since the flag would appear to do nothing.
         settings = load_settings(**({"dry_run": True} if args.dry_run else {}))
-        driver = Driver(settings=settings,
-                        audit=AuditLog(audit_path_for(settings)))
+        driver = driver_from_settings(settings)
         return COMMANDS[args.command](args, driver)
     except Exception as exc:
         print(f"[error] {type(exc).__name__}: {exc}", file=sys.stderr)

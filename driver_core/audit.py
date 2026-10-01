@@ -77,6 +77,24 @@ def required(log, owner):
     return log
 
 
+def same_chain(given, wanted, owner):
+    """The chain an object that acts must write to is *this* one.
+
+    A second chain is worse than none. It is not missing evidence, it is
+    evidence that cannot be linked: the capture, the decision and the action
+    would sit in two files, and only one of them would carry the ``previous``
+    that ties an action to the decision that caused it. A run would read as
+    though the action never happened.
+    """
+    if given is not wanted:
+        raise TypeError(
+            f"{owner} records to a different chain than the one it was given, "
+            f"so nothing would link its records to the step that led to them. "
+            f"Build it with audit=<the driver's own log>, or pass no executor "
+            f"at all and let the driver build one that shares its chain.")
+    return given
+
+
 def _canonical(payload):
     """Byte-stable serialisation.
 
