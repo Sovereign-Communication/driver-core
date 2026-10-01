@@ -439,8 +439,17 @@ repository while it is being built.
 
 The server binds loopback and requires a bearer token. **That is a floor, not
 a security claim.** A local process can read your screen, and a driver holding
-that capability deserves more scepticism than a token header provides. Before
-pointing this at a real machine:
+that capability deserves more scepticism than a token header provides.
+
+What the token check does guarantee is that a refusal is a refusal. A wrong
+token is a **401** on every path shape, method, and body size — including a
+non-ASCII one, which is the case a naive `compare_digest` on text turns into
+a dropped connection, and a `POST` carrying a body, which is the case where a
+server that answers before reading the body has its 401 reset by the OS on the
+way out. `tests/test_auth.py` puts both on a real socket, because an
+in-process test of the check cannot show either.
+
+Before pointing this at a real machine:
 
 - start with `--dry-run` and read what it *would* do;
 - run with a read-only vocabulary until you trust the extraction;
@@ -451,7 +460,7 @@ pointing this at a real machine:
 ## Development
 
 ```bash
-python -m unittest discover -s tests -t .    # 276 hermetic tests
+python -m unittest discover -s tests -t .    # 291 hermetic tests
 ruff check driver_core tests tools
 python tools/tier_order_run.py               # the tier chain, live
 python tools/live_action_run.py              # a declared action, live
@@ -470,8 +479,10 @@ key is configured, and **reports that the live call was skipped when one is
 not** — it never substitutes a provider, because a run that passes against a
 stand-in is evidence of nothing.
 
-The suite is hermetic: no network, no model, no screen, no disk. Fakes live in
-`driver_core/ev.py` and are injected at the seams, which is only possible
-because every collaborator is a constructor argument.
+The suite is hermetic: no model, no screen, no disk, and no host but loopback —
+`tests/test_auth.py` binds a real socket on `127.0.0.1` and talks to it over
+HTTP, because a token check is the one claim that cannot be made in-process.
+Fakes live in `driver_core/ev.py` and are injected at the seams, which is only
+possible because every collaborator is a constructor argument.
 
 [jev]: https://docs.typesafe.ai/introduction/coding-agents.md

@@ -60,6 +60,19 @@ def _wrapped(status, payload):
     return {_ENVELOPE: True, "status": status, "body": payload}
 
 
+def _drain_length(headers):
+    """The declared body length, or 0 when there is nothing to read.
+
+    A malformed ``Content-Length`` counts as nothing: this runs on the
+    refusal path, where the answer is already decided and the only question
+    is how much has to be read before the socket can be closed cleanly.
+    """
+    try:
+        return max(0, int(headers.get("Content-Length") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _refused(reason, detail="", **extra):
     if reason not in STOP_REASONS:
         raise DriverError(f"{reason!r} is not a declared stop reason")
@@ -204,6 +217,11 @@ class Service:
         return _wrapped(200, outcome)
 
 
+#: How much of an unauthenticated request body is read and thrown away so
+#: that the refusal reaches the client. See :meth:`Handler._refuse`.
+MAX_UNAUTHENTICATED_DRAIN_BYTES = 1 << 20
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "driver-core"
 
@@ -211,9 +229,50 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _authorised(self):
+        """Whether this request carries the service token.
+
+        Compared as **bytes**, not as ``str``. ``secrets.compare_digest``
+        raises ``TypeError`` on a ``str`` argument containing a non-ASCII
+        character, so comparing strings meant that a request sending
+        ``Authorization: Bearer café`` escaped the check as an exception
+        rather than a refusal: the connection was dropped with no HTTP
+        response at all and a traceback was printed. A wrong token has to
+        produce a 401 like every other wrong token, and comparing the
+        encoded forms is the form that comparison is specified for.
+        """
         supplied = (self.headers.get("Authorization") or "").removeprefix(
             "Bearer ").strip()
-        return secrets.compare_digest(supplied, self.server.service.token)
+        expected = self.server.service.token
+        return secrets.compare_digest(supplied.encode("utf-8"),
+                                      expected.encode("utf-8"))
+
+    def _refuse(self):
+        """401, having first drained whatever the caller sent.
+
+        The drain is not tidiness. The refusal is written before the body is
+        read, and a socket closed with unread bytes still in its receive
+        queue is reset by the operating system -- which destroys the 401 on
+        its way to the client. Measured over a real connection, an
+        unauthenticated ``POST /step`` delivered its 401 in one request out
+        of four with a small body, and in none at all with a 60 kB one: the
+        caller saw a connection reset rather than a refusal, and a client
+        that cannot tell "you are not authorised" from "the server broke"
+        cannot act on either.
+
+        The bound is what keeps this from becoming the other half of the
+        trade: an unauthenticated caller may make the server read a
+        megabyte and no more, in 64 kB chunks, and a body larger than that
+        is deliberately left undrained. ``Transfer-Encoding: chunked`` has
+        no ``Content-Length`` to read against and is not supported by this
+        server in any path.
+        """
+        remaining = min(_drain_length(self.headers), MAX_UNAUTHENTICATED_DRAIN_BYTES)
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+        self._respond(401, {"ok": False, "error": "unauthorized"})
 
     def _respond(self, status, payload):
         body = json.dumps(payload, sort_keys=True).encode("utf-8")
@@ -225,7 +284,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if not self._authorised():
-            self._respond(401, {"ok": False, "error": "unauthorized"})
+            self._refuse()
             return
         route = self.path.lstrip("/").split("?")[0] or "health"
         outcome = self.server.service.handle(route, {})
@@ -233,7 +292,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if not self._authorised():
-            self._respond(401, {"ok": False, "error": "unauthorized"})
+            self._refuse()
             return
         route = self.path.lstrip("/").split("?")[0]
         try:
