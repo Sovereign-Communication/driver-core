@@ -8,6 +8,7 @@ than a grep so that ``import subprocess as sp`` and
 """
 import ast
 import os
+import pathlib
 import unittest
 
 from driver_core import osal
@@ -52,7 +53,8 @@ class OsBoundaryTests(unittest.TestCase):
         for name, path in _package_modules():
             if name == BOUNDARY_OWNER:
                 continue
-            tree = ast.parse(open(path, encoding="utf-8").read(), path)
+            source = pathlib.Path(path).read_text(encoding="utf-8")
+            tree = ast.parse(source, path)
             for node in ast.walk(tree):
                 for label, predicate in BANNED:
                     if predicate(node):
@@ -63,8 +65,7 @@ class OsBoundaryTests(unittest.TestCase):
     def test_the_owner_actually_owns_what_the_scan_bans(self):
         """If the owner stopped using subprocess the ban would pass
         vacuously, and the guard would be protecting nothing."""
-        source = open(os.path.join(PACKAGE, BOUNDARY_OWNER),
-                      encoding="utf-8").read()
+        source = pathlib.Path(PACKAGE, BOUNDARY_OWNER).read_text(encoding="utf-8")
         self.assertIn("import subprocess", source)
 
     def test_the_scan_covers_the_whole_package(self):
