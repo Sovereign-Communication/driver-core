@@ -444,5 +444,85 @@ class NonInterferenceTests(unittest.TestCase):
         self.assertNotIn("harness", path.lower())
 
 
+class ConsentFaultWordingTests(unittest.TestCase):
+    """A consent for the wrong action is reported as the wrong action.
+
+    Both faults are real, and only one of them is the caller's to fix. A
+    consent captured for ``delete_file`` arriving beside a decision naming
+    ``write_file`` -- with the caller passing exactly the parameters it holds
+    from that consent, which is what a host does -- used to surface as
+    "action 'write_file': missing required parameter(s) ['content']". That
+    message sends the operator to edit the parameters of an action they never
+    consented to, when what is actually wrong is that the consent names a
+    different action.
+    """
+
+    def test_a_wrong_action_consent_is_refused_by_naming_the_action(self):
+        jev = FakeJev(action_answer("write_file", confidence=0.99))
+        driver = _driver(allow_write=True, pool=_agreed_pool(),
+                         sources=[_source()], jev=jev)
+        path = osal.resolve_path("/tmp/never-touched")
+        # Exactly the parameters the delete consent carries, and nothing the
+        # decided action needs. This is the shape the fault was found in.
+        result = driver.step(
+            "target", consent=Consent(True, "delete_file", {"path": path}),
+            params={"path": path})
+        self.assertFalse(result.ok)
+        self.assertEqual(result.stopped_at, "execution")
+        self.assertEqual(result.reason, "execution_refused")
+        self.assertIn("delete_file", result.detail)
+        self.assertIn("write_file", result.detail)
+        self.assertNotIn("missing required parameter", result.detail)
+
+    def test_the_same_two_faults_are_still_reported_when_there_is_no_consent(self):
+        """The wrong-action wording must not swallow the parameter fault.
+
+        With no consent at all there is nothing to compare an action against,
+        so the decided action's own parameters are judged -- and that refusal
+        must still name them.
+        """
+        jev = FakeJev(action_answer("write_file", confidence=0.99))
+        driver = _driver(allow_write=True, pool=_agreed_pool(),
+                         sources=[_source()], jev=jev)
+        result = driver.step("target", params={})
+        self.assertFalse(result.ok)
+        self.assertEqual(result.stopped_at, "execution")
+        self.assertIn("missing required parameter", result.detail)
+
+
+class OfferedActionIsPerformableTests(unittest.TestCase):
+    """The model is offered only what this build can actually carry out.
+
+    Three of the fourteen declared names -- ``run_probe``, ``call_read_tool``
+    and ``read_dom`` -- have no executor in any build at any
+    ``DRIVER_ALLOW_WRITE``. Pre-repair a live model picked ``run_probe`` at
+    1.00 confidence with an exact consent, and the step ended in a refusal
+    naming an executor nothing registered: a refusal the model had no way to
+    avoid, because the option should never have been on the menu.
+    """
+
+    def test_the_driver_hands_the_model_its_own_registry_names(self):
+        jev = FakeJev(action_answer("observe", confidence=0.95))
+        driver = _driver(pool=_agreed_pool(), sources=[_source()], jev=jev)
+        driver.step("target")
+        self.assertTrue(jev.called)
+        performable = jev.calls[0]["performable"]
+        self.assertIsNotNone(performable)
+        self.assertEqual(set(performable),
+                         set(driver.executor.registry.names()))
+        self.assertNotIn("run_probe", performable)
+        self.assertNotIn("read_dom", performable)
+        self.assertNotIn("call_read_tool", performable)
+
+    def test_a_driver_without_write_offers_even_fewer(self):
+        jev = FakeJev(action_answer("observe", confidence=0.95))
+        driver = _driver(pool=_agreed_pool(), sources=[_source()], jev=jev)
+        driver.step("target")
+        performable = set(jev.calls[0]["performable"])
+        self.assertNotIn("write_file", performable)
+        self.assertNotIn("delete_file", performable)
+        self.assertIn("observe", performable)
+
+
 if __name__ == "__main__":
     unittest.main()

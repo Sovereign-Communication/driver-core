@@ -128,6 +128,29 @@ WRITE_EXECUTORS = {
     "submit_irreversible": _submit_irreversible,
 }
 
+def _rehearsal(handler, rehearsal):
+    """Attach a rehearsal to a handler, for a dry run to call.
+
+    A function is an object, so the rehearsal is one attribute rather than
+    a second name -> handler map. A parallel map is exactly the "two owners
+    of one fact" this package keeps deleting, and it can drift out of step
+    with the live one.
+
+    Only the two executors this package performs itself can be rehearsed.
+    Every other handler delegates to a pluggable input backend, and there
+    is nothing honest to compute about what a backend we do not have would
+    have done.
+    """
+    handler.rehearse = rehearsal
+    return handler
+
+
+_rehearsal(_write_file, lambda a, p: osal.atomic_write(
+    p["path"], p["content"], commit=False))
+_rehearsal(_delete_file, lambda a, p: osal.remove_file(p["path"],
+                                                       commit=False))
+
+
 #: Appended to the "not registered" refusal when writes are switched off, so
 #: the refusal tells the operator which of the two reasons applies instead
 #: of leaving them to guess between a wiring fault and a policy decision.

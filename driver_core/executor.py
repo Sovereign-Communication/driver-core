@@ -240,6 +240,21 @@ class Executor:
                 f"{action.name!r}; there is no wildcard grant, because nobody "
                 f"was shown what {action.name!r} with {params} would do. "
                 f"Re-confirm for this exact action and these exact params")
+        if consent.action == action.name:
+            # Same action, different parameters -- and by far the most
+            # common cause is a path stated in an unresolved form. The
+            # comparison is deliberately resolved-against-resolved: consent
+            # for "~/notes" must NOT match the expanded path, because only
+            # one of those forms was shown to the person who said yes. So a
+            # relative or "~" path can never be consented to, and naming
+            # that is the difference between a refusal an operator can act
+            # on and one that reads as a bug.
+            raise ConsentError(
+                f"consent (granted for {action.name!r} {consent.params}) "
+                f"does not authorise it with params {params}; consent is "
+                f"bound to the resolved form the operator was shown, so "
+                f"state any path in that resolved form; re-confirmation "
+                f"is required")
         raise ConsentError(
             f"consent (granted for {consent.action!r} "
             f"{consent.params}) does not authorise {action.name!r} with "
@@ -264,10 +279,32 @@ class Executor:
                 f"{sorted(self.registry.names())}.{self.registry.policy_note}")
 
         if self.dry_run:
-            result = ExecutionResult(
-                action.name, action.action_class, checked, True,
-                detail="dry run: no side effect was performed", output=None,
-                dry_run=True)
+            # A rehearsal, when the handler declares one, is the *same*
+            # function that would commit, told not to commit, so the record
+            # is the record the real run would have produced. A handler
+            # that declares none -- anything delegating to a pluggable
+            # input backend -- keeps an honest null rather than an invented
+            # guess at what a backend we do not have would have done.
+            rehearsal = getattr(handler, "rehearse", None)
+            if rehearsal is None:
+                result = ExecutionResult(
+                    action.name, action.action_class, checked, True,
+                    detail="dry run: no side effect was performed",
+                    output=None, dry_run=True)
+            else:
+                try:
+                    result = ExecutionResult(
+                        action.name, action.action_class, checked, True,
+                        detail="dry run: no side effect was performed",
+                        output=rehearsal(action, checked), dry_run=True)
+                except Exception as exc:
+                    # An impossible write fails in rehearsal exactly as it
+                    # would for real, so a dry run cannot report ok for
+                    # something that could never have happened.
+                    result = ExecutionResult(
+                        action.name, action.action_class, checked, False,
+                        detail=f"dry run could not be performed: {exc}",
+                        output=None, dry_run=True)
         else:
             result = self._invoke(handler, action, checked)
 

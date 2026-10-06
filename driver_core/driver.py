@@ -54,7 +54,7 @@ from .executor import Executor
 from .executor_registry import build_driver_registry
 from .extractors import ExtractorPool
 from .jev_client import JevClient
-from .perception import select_capture
+from .perception import GUI, select_capture
 from .states import SCREEN_SCHEMA
 from .wiring import configured_pools, configured_sources
 
@@ -134,15 +134,6 @@ class Driver:
         # cannot observe rather than a driver that merged the declared
         # sources underneath, and a caller who passes ``pools`` gets exactly
         # the pools they passed.
-        self.sources = list(configured_sources(self.settings)
-                            if sources is None else sources)
-        if screen is not None and not any(s is screen for s in self.sources):
-            # A screen source passed separately joins the one list rather
-            # than becoming a second handle onto it. Two handles are how the
-            # same pixels got captured twice and the vision tier got reported
-            # twice; ``screen`` below is now derived, not stored.
-            self.sources.append(screen)
-
         #: The fallback pool, used for a target whose class is undeclared.
         self.pool = pool or ExtractorPool([])
         #: Pools keyed by declared target class. This is where "three of the
@@ -150,9 +141,28 @@ class Driver:
         #: extraction side: a class is only ever handed the pool that
         #: declared it, so a vision pool is not a candidate for a ``dom``
         #: target rather than merely being discouraged.
+        #
+        # Built before the sources on purpose: whether the screen source
+        # should take a screenshot is a fact about the pool that will read
+        # the capture, and asking the pool afterwards would mean either
+        # capturing and discarding, or a second place that has to know what
+        # a vision pool is.
         self.pools = (configured_pools(self.settings, budget=self.budget,
                                        audit=self.audit)
                       if pools is None else dict(pools))
+
+        gui_pool = self.pools.get(GUI)
+        self.sources = list(
+            configured_sources(
+                self.settings,
+                reads_captures=(gui_pool is None or gui_pool.reads_captures))
+            if sources is None else sources)
+        if screen is not None and not any(s is screen for s in self.sources):
+            # A screen source passed separately joins the one list rather
+            # than becoming a second handle onto it. Two handles are how the
+            # same pixels got captured twice and the vision tier got reported
+            # twice; ``screen`` below is now derived, not stored.
+            self.sources.append(screen)
 
         self.jev = jev or JevClient(self.settings, budget=self.budget,
                                     audit=self.audit)
@@ -223,8 +233,14 @@ class Driver:
                               receipt=receipt, cost=agreement.cost)
 
         # 5. decide
-        decision = self.jev.decide(agreement.state, self.vocabulary,
-                                   receipt=receipt, step_id=step_id)
+        decision = self.jev.decide(
+            agreement.state, self.vocabulary, receipt=receipt,
+            step_id=step_id,
+            # What this build can actually do, not merely what it declares. A
+            # model offered an action with no handler can only ever be refused,
+            # and a refusal the model had no way to avoid is a fault in what it
+            # was offered rather than in what it chose.
+            performable=self.executor.registry.names())
 
         # 6. gate on the decision
         decision_gate = policy.check_decision(
@@ -253,6 +269,15 @@ class Driver:
                               decision=decision, receipt=receipt,
                               cost=decision.cost)
         try:
+            # The action the consent names is compared *before* the decided
+            # action's parameters are judged. Both are real faults, but only
+            # one of them is the caller's to fix, and a wrong-action consent
+            # reported as a missing parameter sends the operator to edit the
+            # wrong thing. The message keeps its single owner: this delegates
+            # to the check the executor already performs.
+            if (consent is not None and action.requires_consent
+                    and consent.action not in ("*", action.name)):
+                self.executor.check_consent(action, {}, consent)
             execution = self.executor.execute(
                 action.name, _params_for(action, params),
                 consent=consent, step_id=step_id)

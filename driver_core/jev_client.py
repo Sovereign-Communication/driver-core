@@ -32,6 +32,7 @@ from .audit import KIND_DECISION
 from .budget import UNAVAILABLE as USAGE_UNAVAILABLE
 from .budget import estimate_call_cost
 from .config import JEV_INPUT_PRICE_PER_MILLION
+from .errors import VocabularyError
 
 SYSTEM_ONE_URL = "https://api.typesafe.ai/v1/systemone"
 
@@ -52,6 +53,27 @@ MALFORMED = "malformed"
 #: provider rounds. Beyond this it is a different answer, not a rounding.
 RANGE_TOLERANCE = 1e-6
 
+#: The narrowest grid this package will infer from a distribution's own
+#: entries, in decimal places. A block of probabilities emitted at full
+#: precision carries no quantisation to infer, and inferring one from float
+#: noise would be a grid that exists nowhere but in this file. One decimal
+#: place is the coarsest grid this will credit: coarser than that and the
+#: values no longer describe a probability at all.
+COARSEST_INFERRED_DECIMAL_PLACE = 1
+
+#: Float noise, in absolute terms. Two hundred and fifty-five entries of at
+#: most 1.0 cannot accumulate more than a few parts in 10^-14 of error from
+#: double arithmetic, so this is a wide margin -- and still far below any
+#: quantisation a provider could actually emit.
+FLOAT_NOISE_TOLERANCE = 1e-9
+
+#: A ceiling on the deviation this package will tolerate whatever grid it
+#: inferred. Beyond one part in ten, a "distribution" no longer describes the
+#: probability of one outcome; it describes a different question. Declared so
+#: the rule holds even if a future option set is emitted on a very coarse
+#: grid.
+MAX_ACCEPTED_DEVIATION = 0.1
+
 
 class Decision:
     """One decision envelope. Signals are all present or all ``None``."""
@@ -59,13 +81,14 @@ class Decision:
     __slots__ = ("status", "recommended_action", "confidence",
                  "probabilities", "guards", "expected_guards", "reasons",
                  "model", "native", "cost", "input_tokens", "output_tokens",
-                 "usage_source", "stop_reason")
+                 "usage_source", "stop_reason", "probability_deviation")
 
     def __init__(self, status, *, recommended_action=None, confidence=None,
                  probabilities=None, guards=None, expected_guards=None,
                  reasons=(), model=None, native=False, cost=0.0,
                  input_tokens=0, output_tokens=0,
-                 usage_source=USAGE_UNAVAILABLE, stop_reason=""):
+                 usage_source=USAGE_UNAVAILABLE, stop_reason="",
+                 probability_deviation=0.0):
         self.status = status
         self.recommended_action = recommended_action
         self.confidence = confidence
@@ -84,6 +107,10 @@ class Decision:
         self.output_tokens = output_tokens
         self.usage_source = usage_source
         self.stop_reason = stop_reason
+        #: How far the returned distribution landed from 1. Recorded rather
+        #: than silently absorbed: a decision acted on after a tolerated
+        #: deviation should still say so in the log. Zero when it was exact.
+        self.probability_deviation = float(probability_deviation or 0.0)
 
     @property
     def missing_guards(self):
@@ -122,6 +149,7 @@ class Decision:
             "output_tokens": self.output_tokens,
             "usage_source": self.usage_source,
             "stop_reason": self.stop_reason,
+            "probability_deviation": round(self.probability_deviation, 9),
             "usable": self.usable,
         }
 
@@ -143,6 +171,7 @@ class Decision:
             "native": self.native,
             "cost_usd": round(self.cost, 9),
             "usage_source": self.usage_source,
+            "probability_deviation": round(self.probability_deviation, 9),
         }
 
     def __repr__(self):
@@ -150,17 +179,52 @@ class Decision:
                 f"{self.recommended_action!r}, conf={self.confidence})")
 
 
-def build_questions(state, vocabulary, *, include_guards=True):
+def offered_actions(vocabulary, performable=None):
+    """The declared actions that may actually be offered to the model.
+
+    Two sets are in play and only one is safe to show. The vocabulary declares
+    what the system can *name*; the registry holds what this build can *do*.
+    Offering the vocabulary alone is how a real model came to choose read_dom
+    at 0.98 confidence and run_probe at 1.00, only for the step to end in a
+    refusal naming an executor that nothing registered: three of the fourteen
+    declared names have no implementation in any build, at any
+    ``DRIVER_ALLOW_WRITE``.
+
+    ``performable=None`` means "do not narrow", which is what a caller holding
+    no registry gets, so nothing that exists today changes. The declaration is
+    untouched either way -- this filters what is *offered*, and a host that
+    backs one of the three through ``Driver.register_executor`` puts it
+    straight back on the menu, which is the extension point the refusal
+    message already promises.
+    """
+    names = vocabulary.names()
+    if performable is None:
+        return names
+    allowed = set(performable)
+    offered = tuple(name for name in names if name in allowed)
+    if not offered:
+        # A registry with nothing in it cannot offer a choice, and an empty
+        # option set is not a question. Refused by name rather than left to
+        # surface as a bare ValueError from the question builder.
+        raise VocabularyError(
+            f"no declared action is performable; the registry named "
+            f"{sorted(allowed)}, none of which is in {list(names)}")
+    return offered
+
+
+def build_questions(state, vocabulary, *, include_guards=True,
+                    performable=None):
     """The declared question set for one decision.
 
-    The action question's options are generated *from the vocabulary*, so the
-    model is choosing among declared actions and cannot name one that does not
-    exist. Guards are nouls on properties of the state rather than on the
-    proposed action, because whether a state is trustworthy is a fact, not a
-    matter of opinion.
+    The action question's options are generated from the declared vocabulary
+    *and* narrowed to what this build can perform, so the model chooses among
+    actions that exist and that something here can actually carry out. Guards
+    are nouls on properties of the state rather than on the proposed action,
+    because whether a state is trustworthy is a fact, not an opinion.
     """
     options = {name: action.description for name, action in
-               ((n, vocabulary.resolve(n)) for n in vocabulary.names())}
+               ((n, vocabulary.resolve(n))
+                for n in offered_actions(vocabulary, performable))}
     questions = {
         "action": transport.choice(
             "Which single declared action best advances the goal, given the "
@@ -184,6 +248,75 @@ def build_questions(state, vocabulary, *, include_guards=True):
                  "the next step must resolve it.",
             false="No blocking choice is pending.")
     return questions
+
+
+def decimal_places(value):
+    """How many decimal places a number appears to have been emitted with."""
+    try:
+        text = repr(float(value))
+    except (TypeError, ValueError):
+        return COARSEST_INFERRED_DECIMAL_PLACE
+    if "e" in text or "E" in text:
+        return 18
+    _whole, _, fraction = text.partition(".")
+    return len(fraction.rstrip("0"))
+
+
+def inferred_grid(probabilities):
+    """The last decimal place the endpoint emitted at, as a power of ten.
+
+    Read off the values themselves rather than declared, because the grid is
+    a property of what the endpoint *did* on this call. Floored at
+    :data:`COARSEST_INFERRED_DECIMAL_PLACE` so a set of whole numbers cannot
+    imply that the units place is a hundredth.
+    """
+    places = COARSEST_INFERRED_DECIMAL_PLACE
+    for value in (probabilities or {}).values():
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        places = max(places, decimal_places(number))
+    return places
+
+
+def accepted_deviation(probabilities):
+    """The largest distance from 1 this distribution may land and still count.
+
+    Derived, not chosen. The endpoint documents that the distribution sums to
+    1, and every worked example it publishes is quantised to two decimal
+    places. At eleven options those two documented facts stop being
+    simultaneously satisfiable: a live run measured nine of twenty, then
+    seven of sixteen, distributions landing exactly 0.01 short -- every entry
+    on a hundredth, with the residue simply lost.
+
+    A fixed ``1e-3`` bound therefore refused roughly half of all live
+    eleven-option calls, and a refused distribution makes the whole envelope
+    unusable, so the effect was a step that acted on nothing while holding a
+    perfectly good ``no_action`` at 0.79 confidence. The confidence that
+    actually decides whether an action runs is the chosen option's own entry,
+    and the sum plays no part in it -- so the check was buying no safety at
+    that price.
+
+    The rule is therefore the provider's own precision: each entry may lose
+    half a unit in the last decimal place the endpoint emitted, and no more.
+    A distribution emitted at full precision gets essentially no tolerance,
+    because full precision means the sum is meant to be exactly 1; a
+    distribution on a hundredth gets enough to cover the rounding it
+    demonstrably performs.
+    """
+    probabilities = probabilities or {}
+    unit = 10.0 ** -inferred_grid(probabilities)
+    return min(max(FLOAT_NOISE_TOLERANCE, len(probabilities) * unit / 2.0),
+               MAX_ACCEPTED_DEVIATION)
+
+
+def probability_deviation(probabilities):
+    """How far a distribution lands from 1, or ``None`` if it is not numeric."""
+    try:
+        return sum(float(value) for value in (probabilities or {}).values()) - 1.0
+    except (TypeError, ValueError):
+        return None
 
 
 def validate_answers(answers, questions, vocabulary):
@@ -228,8 +361,12 @@ def validate_answers(answers, questions, vocabulary):
         reasons.append("probability distribution was not numeric")
         return None, None, {}, {}, reasons
     total = sum(probabilities.values())
-    if abs(total - 1.0) > 1e-3:
-        reasons.append(f"probabilities sum to {total:.4f}, not 1")
+    tolerance = accepted_deviation(probabilities)
+    if abs(total - 1.0) > tolerance:
+        reasons.append(
+            f"probabilities sum to {total:.4f}, not 1: off by "
+            f"{total - 1.0:+.4f}, more than the {tolerance:.6g} that the "
+            f"precision of this distribution allows")
 
     try:
         vocabulary.resolve(chosen)
@@ -307,14 +444,22 @@ class JevClient:
         material += len(json.dumps(questions, default=str).encode("utf-8"))
         return max(1, material // 4 + 1)
 
-    def decide(self, state, vocabulary, *, receipt=None, step_id="step"):
+    def decide(self, state, vocabulary, *, receipt=None, step_id="step",
+               performable=None):
         """Recommend one declared action for a verified state.
+
+        ``performable`` narrows the actions the model is *offered* to those
+        this build can actually carry out. Left ``None`` the full declared
+        vocabulary is offered, which is the behaviour every existing caller
+        had; the driver passes its own registry names so a model is never
+        invited to choose an action nothing here implements.
 
         Every exit path -- keyed, unkeyed, budget-refused, transport-failed,
         malformed -- settles exactly one reservation and writes exactly one
         audit record, so the log has no silent holes.
         """
-        questions = build_questions(state, vocabulary)
+        questions = build_questions(state, vocabulary,
+                                   performable=performable)
         estimate = self.estimate_tokens(state, questions)
         reserve_usd = estimate_call_cost(
             estimate, price_per_million=JEV_INPUT_PRICE_PER_MILLION)
@@ -380,7 +525,10 @@ class JevClient:
                                   if q["type"] == "noul"),
             model=payload.get("model"), native=True, cost=charged,
             input_tokens=input_tokens, output_tokens=output_tokens,
-            usage_source=usage_source)
+            usage_source=usage_source,
+            # How far the returned distribution landed from 1, so a decision
+            # acted on after a tolerated deviation still says so in the log.
+            probability_deviation=probability_deviation(probabilities) or 0.0)
         return self._record(decision, step_id, receipt)
 
     def _record(self, decision, step_id, receipt):

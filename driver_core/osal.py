@@ -198,6 +198,79 @@ def capture_screen():
     return None, f"screen capture is not supported on {name}"
 
 
+def describe_screen():
+    """Describe the foreground window as text. Returns ``(fields, detail)``.
+
+    **This exists because the decision model cannot see.** Jev's endpoint is
+    text-only: a base64 image is tokenized as literal characters, so sending
+    pixels buys a model full of noise and no information. A screen therefore
+    has to become *words* before it reaches a question, and the platform
+    already holds those words.
+
+    Reading the foreground window through the window manager is also cheaper
+    and more exact than describing a picture of it: the title is the title,
+    not a transcription of a title. That is the same preference the tier order
+    already encodes -- structured input before pixels -- applied inside the one
+    tier that used to be the exception.
+
+    The return is a dict of plain, already-typed values rather than prose, so
+    a schema can consume it without parsing English. ``None`` is a refusal
+    with a reason, exactly as in :func:`capture_screen`.
+    """
+    name = platform_name()
+    if name == "windows":
+        return _describe_windows()
+    return None, (f"screen description is not supported on {name}; this is a "
+                  f"platform gap, not a configuration one")
+
+
+def _describe_windows():
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return None, "no foreground window"
+
+    length = user32.GetWindowTextLengthW(hwnd)
+    title = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(hwnd, title, length + 1)
+
+    window_class = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(hwnd, window_class, 256)
+
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+
+    # The process image is a *second* independent fact about the same window,
+    # read through a different API. It is also the one place a path can leak a
+    # username, so only the application name is kept -- the directory is
+    # dropped here rather than at the call site, because a value that was
+    # never assembled cannot be logged by accident.
+    app = ""
+    handle = kernel32.OpenProcess(0x1000, False, pid.value)
+    if handle:
+        try:
+            image = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(1024)
+            if kernel32.QueryFullProcessImageNameW(handle, 0, image,
+                                                   ctypes.byref(size)):
+                app = image.value.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+                if app.lower().endswith(".exe"):
+                    app = app[:-4]
+        finally:
+            kernel32.CloseHandle(handle)
+
+    return {
+        "window_title": title.value,
+        "foreground_app": app,
+        "window_class": window_class.value,
+    }, ""
+
+
 def _capture_windows():
     script = ("Add-Type -AssemblyName System.Windows.Forms,System.Drawing; "
               "$b = [System.Windows.Forms.SystemInformation]::VirtualScreen; "
@@ -424,7 +497,8 @@ def resolve_path(path):
     return os.path.abspath(os.path.expanduser(path))
 
 
-def atomic_write(path, content, *, encoding="utf-8", backup=True):
+def atomic_write(path, content, *, encoding="utf-8", backup=True,
+                 commit=True):
     """Write a file so that no reader ever sees a partial one.
 
     Declared divergences, both of which are answered rather than swallowed:
@@ -440,6 +514,14 @@ def atomic_write(path, content, *, encoding="utf-8", backup=True):
 
     The parent directory is **not** created. Creating a path the operator
     was never shown is a side effect consent did not cover.
+
+    ``commit=False`` performs every check and returns the *same* record,
+    then touches nothing. Every field is already computed before the
+    mutation -- whether the file existed, the byte count, the backup path
+    -- so a rehearsal is this one code path with one branch closed rather
+    than a second implementation free to disagree with the first. That is
+    what makes a dry run a rehearsal instead of a report that says
+    nothing.
     """
     resolved = resolve_path(path)
     if not isinstance(content, str):
@@ -454,6 +536,19 @@ def atomic_write(path, content, *, encoding="utf-8", backup=True):
         raise OsalError(f"{resolved!r} is a directory, not a file")
 
     existed = os.path.exists(resolved)
+    # Built once, before either exit, so the rehearsal record and the real
+    # record are the same expression rather than two that can drift.
+    record = {
+        "path": resolved,
+        "bytes": len(content.encode(encoding)),
+        "replaced": existed,
+        "backup": ((resolved + BACKUP_SUFFIX)
+                   if (existed and backup) else None),
+    }
+    if not commit:
+        # Every field is already known, so this is the real record. Returning
+        # here is the whole rehearsal: one branch closed, no second path.
+        return record
     if existed and backup:
         _backup(resolved)
 
@@ -470,15 +565,10 @@ def atomic_write(path, content, *, encoding="utf-8", backup=True):
     except OSError as exc:
         _discard(temporary)
         raise OsalError(f"could not write {resolved!r}: {exc}") from None
-    return {
-        "path": resolved,
-        "bytes": len(content.encode(encoding)),
-        "replaced": existed,
-        "backup": (resolved + BACKUP_SUFFIX) if (existed and backup) else None,
-    }
+    return record
 
 
-def remove_file(path):
+def remove_file(path, *, commit=True):
     """Delete exactly one file, and refuse every near miss.
 
     Three refusals, each because the alternative is an accident:
@@ -492,6 +582,11 @@ def remove_file(path):
 
     No backup. The action is declared ``IRREVERSIBLE``, and a backup would
     make it recoverable, which would mean the classification was wrong.
+
+    ``commit=False`` performs all three refusals and reports the size that
+    would be freed, without unlinking. The size is read before the unlink
+    either way, so a rehearsal costs nothing extra and cannot drift from
+    the real record.
     """
     resolved = resolve_path(path)
     if not os.path.lexists(resolved):
@@ -506,7 +601,8 @@ def remove_file(path):
             f"never recurses")
     try:
         size = os.path.getsize(resolved)
-        os.unlink(resolved)
+        if commit:
+            os.unlink(resolved)
     except OSError as exc:
         # Windows adds the read-only attribute here, which is the most
         # common cause by a wide margin.

@@ -4,15 +4,27 @@ An audit log is the one artifact whose value is that a record means one thing
 and cannot be quietly reinterpreted later. Two claims are checked, and they
 are different claims:
 
-* **An existing log still verifies.** ``GOLDEN_CHAIN`` below is a real chain,
-  recorded before the record-kind vocabulary was given an owner. It must
-  re-hash clean under the current code.
+* **An existing log still verifies.** ``RECORDED_CHAIN`` below is a real
+  chain, recorded before the record-kind vocabulary was given an owner *and*
+  before the Jev input price was corrected. It must re-hash clean under the
+  current code.
 * **The same run still writes the same bytes.** The scenario pins the clock
   and every ``step_id``, so what it produces is a pure function of the code,
-  and it is compared against that same chain.
+  and it is compared against ``GOLDEN_CHAIN`` -- the same scenario, regenerated
+  against the current code.
 
 The second is the stronger claim and the one that catches a renamed constant.
 A log can verify perfectly while meaning something new.
+
+These two claims are served by **two different literals**, which they did not
+used to be. Both were carried by one ``GOLDEN_CHAIN``, and correcting the Jev
+price forced them apart: the correction moves every ``cost_usd`` a run writes,
+so the byte-for-byte literal had to move, and regenerating it in place would
+have quietly restated the first claim as "a log written by the current code
+verifies" -- which asserts nothing at all. Keeping the old chain frozen costs
+ten literal lines and buys a compatibility surface that did not exist before:
+an operator's existing log, carrying costs from the superseded price, still
+verifies.
 
 The chain is inline rather than a ``.jsonl`` file on purpose: ``.gitignore``
 refuses ``*.jsonl`` because an audit log is evidence about a machine and must
@@ -41,9 +53,27 @@ from driver_core.jev_client import JevClient
 from driver_core.perception import CLI, StructuredSource, Target
 from driver_core.states import CLI_SCHEMA
 
+#: A chain recorded by an **earlier version** of this package, kept frozen.
+#:
+#: Originally this literal served both claims in the module docstring, and
+#: that was one fixture doing two jobs. It no longer can: the Jev input rate
+#: was corrected from $0.0042/Mtok to the operator-verified $0.042/Mtok, which
+#: changes every ``cost_usd`` a run writes, so the byte-for-byte golden had to
+#: move. Regenerating it in place would have quietly turned "a log written
+#: before this change still verifies" into "a log written by the current code
+#: verifies", which is a claim about nothing.
+#:
+#: So the old chain is frozen here permanently and the regenerated one is
+#: :data:`GOLDEN_CHAIN`. That splits the fixture along the line the docstring
+#: already draws, and it buys a real compatibility surface for free: this
+#: recorded log carries 0.0042-era costs, so it now also proves that
+#: correcting a price constant does not break verification of logs an operator
+#: already has on disk. Re-hashing is over the record content, so the chain
+#: still verifies under the current code.
+#:
 #: One JSON object per line, exactly as the log stores them, wrapped to stay
 #: inside the line length.
-GOLDEN_CHAIN = (
+RECORDED_CHAIN = (
     (
      "{\"at\":\"2026-01-01T00:00:00.000000+00:00\",\"detail\":\"target 'unobser"
      "vable' is declared 'cli' and no configured source serves that clas"
@@ -148,6 +178,120 @@ GOLDEN_CHAIN = (
      "ash\":\"3eb75644eb0d51f5c062b6f11dadd766ccd2247d0e481c96316668497702"
      "70e9\",\"kind\":\"action\",\"ok\":true,\"previous\":\"e47fbdf380195fbeb95fe3"
      "42b475924347eeb83d20a81d0f9cf3e1a26016441b\",\"seq\":9,\"step_id\":\"ste"
+     "p000000003\"}"
+    ),
+)
+
+#: The same scenario under the **current** code, regenerated after the Jev
+#: input rate was corrected. This is the byte-for-byte determinism claim;
+#: the "an older log still verifies" claim is :data:`RECORDED_CHAIN` above.
+#: Regenerate with ``python -m tests.test_audit_compat --emit`` and never in
+#: CI -- a chain produced by the code under test proves nothing about it.
+GOLDEN_CHAIN = (
+    (
+     "{\"at\":\"2026-01-01T00:00:00.000000+00:00\",\"detail\":\"target 'unobser"
+     "vable' is declared 'cli' and no configured source serves that clas"
+     "s; nothing was tried. Configured sources: ['none'].\",\"hash\":\"98c94"
+     "270f43a33f50f308df7fad8290836267bb9f7b504e02aee5056d59bd982\",\"kind"
+     "\":\"refusal\",\"previous\":\"driver-core/audit/v1\",\"reason\":\"no_capture"
+     "\",\"seq\":0,\"step_id\":\"step000000001\",\"stopped_at\":\"capture\"}"
+    ),
+    (
+     "{\"at\":\"2026-01-01T00:00:00.000000+00:00\",\"detail\":\"\",\"fingerprint\""
+     ":\"45475af213f2b5ea\",\"hash\":\"7218b26519ca0fffe828626465a02b2d97f46e"
+     "5423089fce1e6ecfb781f14da3\",\"kind\":\"capture\",\"ok\":true,\"previous\":"
+     "\"98c94270f43a33f50f308df7fad8290836267bb9f7b504e02aee5056d59bd982\""
+     ",\"seq\":1,\"source\":\"cli\",\"step_id\":\"step000000002\",\"target\":\"observ"
+     "ed\"}"
+    ),
+    (
+     "{\"agreed_fields\":[\"exit_code\",\"stdout\",\"stderr\"],\"answering\":2,\"as"
+     "ked\":2,\"at\":\"2026-01-01T00:00:00.000000+00:00\",\"contested_fields\":"
+     "[],\"cost\":0.0,\"extraction_id\":\"step000000002\",\"hash\":\"e9ceec17fd3e"
+     "853a7e465f37baec2c5812140ebd144da1c45854a06b9590de8c\",\"kind\":\"extr"
+     "action\",\"outcome\":\"agreed\",\"previous\":\"7218b26519ca0fffe828626465a"
+     "02b2d97f46e5423089fce1e6ecfb781f14da3\",\"schema\":\"driver-core-cli@1"
+     ".0.0\",\"seq\":2,\"step_id\":\"step000000002\",\"unanswered\":[]}"
+    ),
+    (
+     "{\"at\":\"2026-01-01T00:00:00.000000+00:00\",\"confidence\":0.1,\"cost_us"
+     "d\":4.2e-06,\"extraction\":{\"agreed_fields\":[\"exit_code\",\"stdout\",\"st"
+     "derr\"],\"answering\":2,\"asked\":2,\"contested_fields\":[],\"cost\":0.0,\"e"
+     "xtraction_id\":\"step000000002\",\"outcome\":\"agreed\",\"schema\":\"driver-"
+     "core-cli@1.0.0\",\"unanswered\":[]},\"guards\":{\"a_blocking_choice_is_r"
+     "equired\":0.2,\"state_is_stable\":0.95},\"hash\":\"3f4a0e2d86603a03f4f15"
+     "b7b97257fc0cba7f8939e593e3233cfc55522a2d62a\",\"kind\":\"decision\",\"mo"
+     "del\":\"fake-jev\",\"native\":true,\"previous\":\"e9ceec17fd3e853a7e465f37"
+     "baec2c5812140ebd144da1c45854a06b9590de8c\",\"probabilities\":{\"call_r"
+     "ead_tool\":0.06923076923076923,\"click\":0.06923076923076923,\"delete_"
+     "file\":0.06923076923076923,\"focus\":0.06923076923076923,\"no_action\":"
+     "0.06923076923076923,\"observe\":0.06923076923076923,\"press_key\":0.06"
+     "923076923076923,\"read_dom\":0.06923076923076923,\"read_value\":0.0692"
+     "3076923076923,\"run_probe\":0.06923076923076923,\"scroll\":0.069230769"
+     "23076923,\"submit_irreversible\":0.06923076923076923,\"type_text\":0.0"
+     "6923076923076923,\"write_file\":0.1},\"probability_deviation\":0.0,\"re"
+     "commended_action\":\"write_file\",\"seq\":3,\"status\":\"native\",\"step_id\""
+     ":\"step000000002\",\"usage_source\":\"actual\"}"
+    ),
+    (
+     "{\"at\":\"2026-01-01T00:00:00.000000+00:00\",\"detail\":\"confidence 0.1 "
+     "is below the 0.7 threshold\",\"hash\":\"9f7b2bb40849bce25c327509216405"
+     "96e27b92e29d679c626f77f5fbe0296647\",\"kind\":\"escalation\",\"previous\""
+     ":\"3f4a0e2d86603a03f4f15b7b97257fc0cba7f8939e593e3233cfc55522a2d62a"
+     "\",\"reason\":\"confidence_below_threshold\",\"seq\":4,\"step_id\":\"step000"
+     "000002\"}"
+    ),
+    (
+     "{\"at\":\"2026-01-01T00:00:00.000000+00:00\",\"detail\":\"confidence 0.1 "
+     "is below the 0.7 threshold\",\"hash\":\"0d5bcbbd472c84b2dff21623e4e8ec"
+     "bdadcdfd0156ad6afde14cceb77e1b00ed\",\"kind\":\"refusal\",\"previous\":\"9"
+     "f7b2bb40849bce25c32750921640596e27b92e29d679c626f77f5fbe0296647\",\""
+     "reason\":\"confidence_below_threshold\",\"seq\":5,\"step_id\":\"step000000"
+     "002\",\"stopped_at\":\"decision\"}"
+    ),
+    (
+     "{\"at\":\"2026-01-01T00:00:00.000000+00:00\",\"detail\":\"\",\"fingerprint\""
+     ":\"45475af213f2b5ea\",\"hash\":\"473cb4989936b3ad3e448be237bc9a5fdd3d71"
+     "834a223d76217406489989c451\",\"kind\":\"capture\",\"ok\":true,\"previous\":"
+     "\"0d5bcbbd472c84b2dff21623e4e8ecbdadcdfd0156ad6afde14cceb77e1b00ed\""
+     ",\"seq\":6,\"source\":\"cli\",\"step_id\":\"step000000003\",\"target\":\"observ"
+     "ed\"}"
+    ),
+    (
+     "{\"agreed_fields\":[\"exit_code\",\"stdout\",\"stderr\"],\"answering\":2,\"as"
+     "ked\":2,\"at\":\"2026-01-01T00:00:00.000000+00:00\",\"contested_fields\":"
+     "[],\"cost\":0.0,\"extraction_id\":\"step000000003\",\"hash\":\"c4eda45c689c"
+     "dba33171860d4269ab02b9b4418d22f1f53bbd84bdf135fd6588\",\"kind\":\"extr"
+     "action\",\"outcome\":\"agreed\",\"previous\":\"473cb4989936b3ad3e448be237b"
+     "c9a5fdd3d71834a223d76217406489989c451\",\"schema\":\"driver-core-cli@1"
+     ".0.0\",\"seq\":7,\"step_id\":\"step000000003\",\"unanswered\":[]}"
+    ),
+    (
+     "{\"at\":\"2026-01-01T00:00:00.000000+00:00\",\"confidence\":0.99,\"cost_u"
+     "sd\":4.2e-06,\"extraction\":{\"agreed_fields\":[\"exit_code\",\"stdout\",\"s"
+     "tderr\"],\"answering\":2,\"asked\":2,\"contested_fields\":[],\"cost\":0.0,\""
+     "extraction_id\":\"step000000003\",\"outcome\":\"agreed\",\"schema\":\"driver"
+     "-core-cli@1.0.0\",\"unanswered\":[]},\"guards\":{\"a_blocking_choice_is_"
+     "required\":0.2,\"state_is_stable\":0.95},\"hash\":\"834b631eaf95b3bedb88"
+     "969dfd119a3ed3a228b61037721b16df5eb3109558a3\",\"kind\":\"decision\",\"m"
+     "odel\":\"fake-jev\",\"native\":true,\"previous\":\"c4eda45c689cdba33171860"
+     "d4269ab02b9b4418d22f1f53bbd84bdf135fd6588\",\"probabilities\":{\"call_"
+     "read_tool\":0.0007692307692307699,\"click\":0.0007692307692307699,\"de"
+     "lete_file\":0.0007692307692307699,\"focus\":0.0007692307692307699,\"no"
+     "_action\":0.0007692307692307699,\"observe\":0.99,\"press_key\":0.000769"
+     "2307692307699,\"read_dom\":0.0007692307692307699,\"read_value\":0.0007"
+     "692307692307699,\"run_probe\":0.0007692307692307699,\"scroll\":0.00076"
+     "92307692307699,\"submit_irreversible\":0.0007692307692307699,\"type_t"
+     "ext\":0.0007692307692307699,\"write_file\":0.0007692307692307699},\"pr"
+     "obability_deviation\":0.0,\"recommended_action\":\"observe\",\"seq\":8,\"s"
+     "tatus\":\"native\",\"step_id\":\"step000000003\",\"usage_source\":\"actual\"}"
+    ),
+    (
+     "{\"action\":\"observe\",\"action_class\":\"read_only\",\"at\":\"2026-01-01T00"
+     ":00:00.000000+00:00\",\"consent\":null,\"detail\":\"\",\"dry_run\":false,\"h"
+     "ash\":\"2057cde216ee32e9debb2186dc44b8b846e5462aadcf575b5e99bfc1291a"
+     "95c6\",\"kind\":\"action\",\"ok\":true,\"previous\":\"834b631eaf95b3bedb8896"
+     "9dfd119a3ed3a228b61037721b16df5eb3109558a3\",\"seq\":9,\"step_id\":\"ste"
      "p000000003\"}"
     ),
 )
@@ -259,12 +403,14 @@ class ChainCompatibilityTests(unittest.TestCase):
 
         The chain is a literal in this module, so writing it out and reading
         it back is what makes the claim about *logs on disk* rather than about
-        a list in memory.
+        a list in memory. It verifies :data:`RECORDED_CHAIN`, which was
+        written by an earlier version -- including under the superseded Jev
+        price -- and must therefore still re-hash clean today.
         """
         with tempfile.TemporaryDirectory() as workdir:
             path = os.path.join(workdir, "audit.jsonl")
             with open(path, "w", encoding="utf-8", newline="\n") as handle:
-                for record in GOLDEN_CHAIN:
+                for record in RECORDED_CHAIN:
                     handle.write(record + "\n")
             return AuditLog(path).verify()
 

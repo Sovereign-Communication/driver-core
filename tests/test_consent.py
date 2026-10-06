@@ -550,5 +550,115 @@ class PipelineOkMeansActedTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(target))
 
 
+class RehearsalFidelityTests(unittest.TestCase):
+    """A dry run is the same function with one branch closed.
+
+    The executor docstring promises the rehearsal produces "the identical
+    record ... rather than a different code path that happens to skip the
+    interesting part". Pre-repair the two executors driver-core performs
+    itself reported ``output: null`` in dry mode while the live run reported
+    bytes, a replacement flag and a backup path -- so the promise the
+    docstring made was one the code did not keep, and a dry run told an
+    operator nothing about what the real run was about to do.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp(prefix="driver-rehearsal-")
+        self.addCleanup(shutil.rmtree, self.directory, True)
+
+    def _path(self, name):
+        return osal.resolve_path(os.path.join(self.directory, name))
+
+    def test_a_rehearsed_write_reports_exactly_what_a_real_write_reports(self):
+        target = self._path("a.txt")
+        osal.atomic_write(target, "first")
+        consent = Consent(True, "write_file",
+                          {"path": target, "content": "second"})
+
+        rehearsal = _executor(dry_run=True).execute(
+            "write_file", {"path": target, "content": "second"},
+            consent=consent)
+        self.assertTrue(rehearsal.ok)
+        self.assertTrue(rehearsal.dry_run)
+        with open(target, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "first", "the dry run wrote")
+        self.assertFalse(os.path.exists(target + osal.BACKUP_SUFFIX),
+                         "the dry run took a backup")
+
+        real = _executor().execute(
+            "write_file", {"path": target, "content": "second"},
+            consent=Consent(True, "write_file",
+                            {"path": target, "content": "second"}))
+        self.assertEqual(rehearsal.output, real.output)
+        self.assertTrue(real.output["replaced"])
+        self.assertEqual(real.output["backup"], target + osal.BACKUP_SUFFIX)
+
+    def test_a_rehearsed_delete_reports_exactly_what_a_real_delete_reports(self):
+        target = self._path("b.txt")
+        osal.atomic_write(target, "123456789")
+
+        rehearsal = _executor(dry_run=True).execute(
+            "delete_file", {"path": target},
+            consent=Consent(True, "delete_file", {"path": target}))
+        self.assertTrue(rehearsal.ok)
+        self.assertTrue(os.path.isfile(target), "the dry run deleted the file")
+
+        real = _executor().execute(
+            "delete_file", {"path": target},
+            consent=Consent(True, "delete_file", {"path": target}))
+        self.assertEqual(rehearsal.output, real.output)
+        self.assertEqual(real.output["bytes"], 9)
+        self.assertFalse(os.path.exists(target))
+
+    def test_a_rehearsal_reports_an_impossible_write_as_a_refusal(self):
+        """A rehearsal that could never have happened must not report ok."""
+        missing = os.path.join(self.directory, "no", "such", "a.txt")
+        result = _executor(dry_run=True).execute(
+            "write_file", {"path": missing, "content": "x"},
+            consent=Consent(True, "write_file",
+                            {"path": missing, "content": "x"}))
+        self.assertFalse(result.ok)
+        self.assertIn("could not be performed", result.detail)
+        self.assertIsNone(result.output)
+
+
+class RefusalWordingTests(unittest.TestCase):
+    """A refusal names the fault the caller can actually fix."""
+
+    def test_a_same_action_different_path_refusal_names_the_resolved_form(self):
+        """The comparison is resolved-against-resolved *on purpose*.
+
+        ``test_consent_for_an_unresolved_path_does_not_match`` pins that
+        guarantee: resolving the consent side too would silently widen every
+        grant. So a relative or ``~`` path can never be consented to, and the
+        refusal has to say so -- otherwise it reads as a bug in the driver
+        rather than as a rule the operator can act on.
+        """
+        executor = _executor()
+        action = DEFAULT_VOCABULARY.resolve("write_file")
+        consent = Consent(True, "write_file",
+                          {"path": "/tmp/consented", "content": "x"})
+        with self.assertRaises(ConsentError) as ctx:
+            executor.check_consent(
+                action, {"path": "/tmp/other", "content": "x"}, consent)
+        message = str(ctx.exception)
+        self.assertIn("resolved form", message)
+        self.assertIn("re-confirmation", message)
+        self.assertIn("/tmp/other", message)
+        self.assertNotIn("missing required parameter", message)
+
+    def test_a_wrong_action_refusal_names_both_actions(self):
+        executor = _executor()
+        action = DEFAULT_VOCABULARY.resolve("write_file")
+        with self.assertRaises(ConsentError) as ctx:
+            executor.check_consent(action, {"path": "/tmp/x", "content": ""},
+                                   Consent(True, "delete_file",
+                                           {"path": "/tmp/x"}))
+        message = str(ctx.exception)
+        self.assertIn("delete_file", message)
+        self.assertIn("write_file", message)
+        self.assertNotIn("missing required parameter", message)
+
+
 if __name__ == "__main__":
     unittest.main()

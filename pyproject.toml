@@ -11,6 +11,18 @@ name = "driver-core"
 # remove the second copy instead, but it makes the build depend on importing
 # the package, and a test catches the drift that actually matters without
 # touching packaging.
+# 3.5.0: the Jev input price is corrected from $0.0042/Mtok to $0.042/Mtok, the
+# rate reconciled from an operator usage export (13,661,429 input tokens billed
+# at $0.5738 implies $0.0420/Mtok exactly). The old constant was a temporary
+# correction made while the real rate was still being established and was never
+# walked back, so every reservation, every settled figure in the audit chain
+# and every cost reported by GET /verify was a tenth of the truth. Because
+# reservations are priced with this constant and compared against the step and
+# run ceilings, both ceilings admitted ten times the intended spend before
+# refusing: "refuse before dispatch" held throughout, guarding a smaller purse
+# than the operator believes. No record written by an earlier version changes
+# meaning, and tests/test_audit_compat.py still re-hashes a recorded chain that
+# carries 0.0042-era costs, so an existing log on disk keeps verifying.
 # 3.4.0: the audit log's record vocabulary has one owner. Producers import
 # audit.KIND_* rather than writing the string, KIND_CONSENT is deleted
 # because nothing produced it, and states.FREE_CLASSES is deleted as a
@@ -38,7 +50,7 @@ name = "driver-core"
 # "what does this wire `schema` mean" is decided in one place instead of
 # separately in the CLI and the service. POST /step is unchanged: same fields,
 # same STOP_REASONS, same StepResult.to_dict().
-version = "3.4.0"
+version = "3.5.0"
 # 3.0.0: the perception tiers are reachable from the product. Sources are
 # registered from declared DRIVER_* settings (DRIVER_CLI_COMMAND,
 # DRIVER_MCP_COMMAND + DRIVER_MCP_TOOL, DRIVER_DOM_URL, DRIVER_SCREEN), and an

@@ -106,4 +106,4 @@ previously stood for "every mutating action" was removed from this package's
 vocabulary of grants. The wire contract did not change then either.
 """
 
-__version__ = "3.4.0"
+__version__ = "3.5.0"

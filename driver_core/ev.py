@@ -54,9 +54,15 @@ class FakeJev:
         self.calls = []
         self.cost = cost
 
-    def decide(self, state, vocabulary, *, receipt=None, step_id="step"):
+    def decide(self, state, vocabulary, *, receipt=None, step_id="step",
+               performable=None):
+        # ``performable`` is recorded rather than ignored: the safety property
+        # "the model was never offered an action with no handler" is only
+        # observable by checking what the double was handed.
         self.calls.append({"state": dict(state) if state else state,
-                           "receipt": receipt, "step_id": step_id})
+                           "receipt": receipt, "step_id": step_id,
+                           "performable": (None if performable is None
+                                           else tuple(performable))})
         if self._decision_fn is not None:
             return self._decision_fn(state, vocabulary, receipt=receipt,
                                      step_id=step_id)

@@ -46,7 +46,22 @@ DEFAULT_RUN_CEILING_USD = 5.00
 #: Jev is priced on input only; output tokens are free at the account level.
 #: Stated here as a named constant with its provenance rather than inlined at
 #: the call site, so a price correction is a one-line, reviewable change.
-JEV_INPUT_PRICE_PER_MILLION = 0.0042
+#:
+#: The rate is **$0.042/Mtok** ($42 per billion input tokens), reconciled from
+#: an operator usage export: 13,661,429 input tokens billed at $0.5738, which
+#: implies $0.0420/Mtok exactly. This constant previously read ``0.0042`` --
+#: ten times low -- which had been a temporary correction made while the real
+#: rate was still being established, and it was never walked back. The error is
+#: silent by construction: it under-reserves, so no budget refusal ever fires
+#: early, and it under-reports, so every settled figure in the audit chain and
+#: in ``GET /verify`` reads a tenth of what was actually spent.
+#:
+#: The blast radius is the ceilings themselves. ``DEFAULT_STEP_CEILING_USD``
+#: and ``DEFAULT_RUN_CEILING_USD`` are compared against reservations priced
+#: here, so at a tenth of the true rate they admit ten times the intended
+#: spend before refusing. "Refuse before dispatch" was true throughout; it was
+#: simply guarding a smaller purse than the operator believes.
+JEV_INPUT_PRICE_PER_MILLION = 0.042
 
 #: Confidence above which a decision is acted on. Jev's calibrated
 #: confidence is the signal; this is the threshold; code owns both the
