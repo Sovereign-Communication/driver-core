@@ -39,14 +39,19 @@ So :func:`send_input` is a *declaration* with a pluggable backend. Unregistered
 is the default state, and it refuses -- loudly, by name -- rather than
 appearing to succeed while doing nothing.
 """
+import math
 import os
 import shutil
+import struct
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 
 from .errors import OsalError
+from .png import decodable as decodable_png
 
 #: How long a child process may run before it is killed.
 DEFAULT_TIMEOUT = 30
@@ -82,10 +87,6 @@ def platform_name():
     if sys.platform.startswith("linux"):
         return "linux"
     return f"unknown:{sys.platform}"
-
-
-def is_supported():
-    return platform_name() in SUPPORTED
 
 
 def run(argv, *, cwd=None, timeout=DEFAULT_TIMEOUT, env=None, input_text=None,
@@ -181,31 +182,66 @@ class ProcessResult:
 # always a named answer and never an empty file that looks like a blank
 # screen.
 
-def capture_screen():
-    """Capture the screen. Returns ``(path, detail)``; ``path`` may be None.
+#: Measured endpoint bounds: 280..1568 px per side and
+#: 78,400..2,458,624 total pixels -- and since 1568 * 1568 is exactly the
+#: total-pixel ceiling, fitting the per-side cap fits both bounds at the
+#: top. The floor is closed here too (see :func:`fit_target`), so that
+#: *any* capture leaves this module a valid request asset: an
+#: under-minimum capture is padded out to the bounds rather than enlarged,
+#: because enlarging invents pixels and a padded canvas invents nothing.
+MAX_IMAGE_SIDE = 1568
+
+#: The floor of the same bounds: per side, and total pixels (280 * 280).
+#: Docs still say 256, but live 1-bit and RGB PNG probes on 2026-10-14
+#: rejected 279-pixel sides and accepted 280 (including narrow rectangles).
+MIN_IMAGE_SIDE = 280
+MIN_IMAGE_PIXELS = 78400
+
+#: PNG's eight magic bytes. Every capture here is PNG, but reading beats
+#: trusting: the header is checked rather than assumed.
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def capture_screen(*, max_side=MAX_IMAGE_SIDE):
+    """Capture the screen, fitted to the image caps. Returns ``(path,
+    detail)``; ``path`` may be None.
 
     A refusal is a first-class result. A driver handed an unreadable capture
     should route to a structured source, not ask a vision model to describe
     a file that does not exist.
+
+    ``max_side`` fits the capture to the endpoint's image bounds at
+    capture time (PNG in, PNG out), because the far end *rejects* an
+    out-of-range image rather than resizing it -- so the file returned
+    here is a valid request asset at both bounds, padded onto a canvas if
+    it is small. Pass ``max_side=None`` to capture raw.
     """
     name = platform_name()
     if name == "windows":
-        return _capture_windows()
-    if name == "darwin":
-        return _capture_macos()
-    if name == "linux":
-        return _capture_linux()
-    return None, f"screen capture is not supported on {name}"
+        path, detail = _capture_windows()
+    elif name == "darwin":
+        path, detail = _capture_macos()
+    elif name == "linux":
+        path, detail = _capture_linux()
+    else:
+        return None, f"screen capture is not supported on {name}"
+    if path is None or max_side is None:
+        return path, detail
+    fitted, why = fit_image(path, max_side=max_side)
+    if fitted is None:
+        return None, why
+    return fitted, detail
 
 
 def describe_screen():
     """Describe the foreground window as text. Returns ``(fields, detail)``.
 
-    **This exists because the decision model cannot see.** Jev's endpoint is
-    text-only: a base64 image is tokenized as literal characters, so sending
-    pixels buys a model full of noise and no information. A screen therefore
-    has to become *words* before it reaches a question, and the platform
-    already holds those words.
+    **The words mode, and the facts reader.** The endpoint takes pixels
+    now, so this is no longer the only way a screen can reach a question.
+    It still runs on every path: the window manager holds the title
+    *exactly* rather than as a transcription of a picture, so these are the
+    facts the state merges whatever the model judged -- and the evidence
+    the pixels mode falls back to when no capture can be taken.
 
     Reading the foreground window through the window manager is also cheaper
     and more exact than describing a picture of it: the title is the title,
@@ -307,6 +343,372 @@ def _capture_linux():
     if not result.ok or not os.path.exists(out):
         return None, f"capture failed: {result.error or result.stderr[:200]}"
     return out, ""
+
+
+# ---- image preparation --------------------------------------------------
+# The endpoint takes a PNG or JPEG inside hard pixel bounds and *rejects*
+# anything outside them rather than resizing it, so fitting a capture to
+# those bounds is part of capture rather than a caller's problem: a file
+# this module returns is a valid request asset or it is a named refusal,
+# never a capture that will fail later at the far end.
+#
+# The arithmetic lives here, in Python: the canvas a capture must become
+# and the size its content is drawn at on that canvas. The platform step
+# only composes -- "fill a WxH canvas with the content drawn at DxH,
+# centred". Two owners of one fit rule is how a Windows capture and a
+# Linux capture end up obeying different caps.
+
+
+def fit_within(width, height, max_side=MAX_IMAGE_SIDE):
+    """The size to send so an image fits the caps; aspect preserved.
+
+    Uniform scale toward the cap: an image already inside it is returned
+    unchanged, and an oversized one comes back with its longest side
+    exactly at ``max_side`` and the other side rounded to whole pixels.
+    This is the only place the shrink decision is made -- platform scalers
+    receive their target from here and get no say in it.
+    """
+    for name, value in (("width", width), ("height", height),
+                        ("max_side", max_side)):
+        if not isinstance(value, int) or value < 1:
+            raise ValueError(
+                f"{name} must be a positive integer, got {value!r}")
+    longest = max(width, height)
+    if longest <= max_side:
+        return width, height
+    scale = max_side / longest
+    return max(1, round(width * scale)), max(1, round(height * scale))
+
+
+def fit_target(width, height, *, max_side=MAX_IMAGE_SIDE,
+               min_side=MIN_IMAGE_SIDE, min_pixels=MIN_IMAGE_PIXELS):
+    """The canvas that makes this image a valid asset at *both* bounds.
+
+    Shrinks first (:func:`fit_within`), then grows the canvas to clear the
+    floor. Growing was deliberately absent while preparation only had to
+    shrink -- enlarging invents pixels -- but "a valid asset for any
+    capture" has to give somewhere, and the choice is padding over
+    upscaling: a padded canvas is always constructible and invents
+    nothing, while a uniform upscale cannot always reach the floor without
+    breaching the cap (1000x20 would have to be 1980 px wide at its own
+    aspect to reach 78,400 pixels). The content keeps its own size on
+    that canvas; see :func:`fit_size`.
+
+    The result always satisfies the endpoint's bounds: every side within
+    ``min_side``..``max_side``, and at least ``min_pixels`` in total.
+    """
+    for name, value in (("min_side", min_side), ("min_pixels", min_pixels)):
+        if not isinstance(value, int) or value < 1:
+            raise ValueError(
+                f"{name} must be a positive integer, got {value!r}")
+    width, height = fit_within(width, height, max_side)
+    if min_side > max_side or min_pixels > max_side * max_side:
+        raise ValueError("image floor cannot fit within max_side")
+    canvas_width = max(width, min_side)
+    canvas_height = max(height, min_side)
+    if canvas_width * canvas_height < min_pixels:
+        grow = math.sqrt(min_pixels / (canvas_width * canvas_height))
+        canvas_width = min(max_side, math.ceil(canvas_width * grow))
+        canvas_height = min(max_side, math.ceil(canvas_height * grow))
+        # A long side may hit its cap before proportional growth clears
+        # the area floor. Add padding on the remaining axis using exact
+        # integer division; feasible floors always fit in max_side squared.
+        canvas_width = min(max_side, max(
+            canvas_width, (min_pixels + canvas_height - 1) // canvas_height))
+        canvas_height = max(
+            canvas_height, (min_pixels + canvas_width - 1) // canvas_width)
+    return canvas_width, canvas_height
+
+
+@dataclass(frozen=True)
+class ImageGeometry:
+    """The original image and its centred, uniformly fitted content rectangle."""
+
+    width: int
+    height: int
+    canvas_width: int
+    canvas_height: int
+    draw_width: int
+    draw_height: int
+
+    @property
+    def offset(self):
+        return ((self.canvas_width - self.draw_width) // 2,
+                (self.canvas_height - self.draw_height) // 2)
+
+    def source_box(self, box):
+        """Canvas fractions -> original image/crop fractions, excluding padding.
+
+        Crop coordinates remain relative to the crop supplied by the caller;
+        preparation neither guesses a parent-frame origin nor stretches it.
+        A box entirely in padding has no location in the original image.
+        """
+        x, y = self.offset
+        result = {
+            edge: max(0.0, min(1.0, (box[edge] * canvas - offset) / draw))
+            for edge, canvas, offset, draw in (
+                ("left", self.canvas_width, x, self.draw_width),
+                ("right", self.canvas_width, x, self.draw_width),
+                ("top", self.canvas_height, y, self.draw_height),
+                ("bottom", self.canvas_height, y, self.draw_height))
+        }
+        if result["left"] >= result["right"] or result["top"] >= result["bottom"]:
+            return None
+        return result
+
+
+@dataclass(frozen=True)
+class PreparedImage:
+    """One decoded snapshot: dispatch bytes and their source geometry."""
+
+    data: bytes
+    geometry: ImageGeometry
+
+
+def fit_size(width, height, canvas_width, canvas_height):
+    """The size the content is drawn at on its canvas.
+
+    The largest uniform fit of ``width`` x ``height`` inside the canvas,
+    never larger than the content itself: a canvas bigger than its content
+    is padding, not an upscale.
+    """
+    for name, value in (("width", width), ("height", height),
+                        ("canvas_width", canvas_width),
+                        ("canvas_height", canvas_height)):
+        if not isinstance(value, int) or value < 1:
+            raise ValueError(
+                f"{name} must be a positive integer, got {value!r}")
+    scale = min(canvas_width / width, canvas_height / height, 1.0)
+    return (max(1, round(width * scale)), max(1, round(height * scale)))
+
+
+def png_dimensions(path):
+    """``(width, height)`` from a PNG's IHDR, or None if it is not a PNG.
+
+    Reads the complete 33-byte IHDR, not the raster. Dispatch preparation
+    separately forces decoding through the platform compositor.
+    """
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(33)
+    except OSError:
+        return None
+    if (len(head) < 33 or head[:8] != PNG_SIGNATURE
+            or head[8:12] != b"\x00\x00\x00\x0d" or head[12:16] != b"IHDR"):
+        return None
+    width, height = struct.unpack(">II", head[16:24])
+    return width, height
+
+
+def fit_image(path, *, max_side=MAX_IMAGE_SIDE, reader=None, scaler=None):
+    """Fit one captured PNG to the image bounds, in place. ``(path, detail)``.
+
+    Shrinks an oversized capture, pads an undersized one onto a canvas
+    sized by :func:`fit_target`, and draws the content at the size
+    :func:`fit_size` chose -- never enlarged. A capture already inside the
+    bounds is left untouched.
+
+    The seams are injectable so the fit-or-not decision is testable
+    without a screen, a display server, or a platform image tool -- the
+    same rule the rest of this package uses.
+    """
+    fitted, _geometry, detail = _fit_image(
+        path, max_side=max_side, reader=reader, scaler=scaler)
+    return fitted, detail
+
+
+def prepare_crop(path, region):
+    """Prepare an integer source crop without modifying the owned source PNG."""
+    size = png_dimensions(path)
+    if size is None or len(region) != 4:
+        return None, "invalid crop source or region"
+    with open(path, "rb") as handle:
+        if not decodable_png(handle.read()):
+            return None, "crop source PNG raster is not decodable"
+    x, y, width, height = region
+    if (any(type(v) is not int for v in region) or min(x, y) < 0
+            or min(width, height) < 1 or x + width > size[0]
+            or y + height > size[1]):
+        return None, "crop outside source bounds"
+    with tempfile.TemporaryDirectory(prefix="driver-crop-") as directory:
+        output = os.path.join(directory, "crop.png")
+        name = platform_name()
+        if name == "windows":
+            script = ("$ErrorActionPreference='Stop'; "
+                      "Add-Type -AssemblyName System.Drawing; "
+                      "$i=[System.Drawing.Bitmap]::FromFile($env:DRIVER_CROP_IN); "
+                      "$r=New-Object System.Drawing.Rectangle "
+                      "([int]$env:DRIVER_CROP_X),([int]$env:DRIVER_CROP_Y),"
+                      "([int]$env:DRIVER_CROP_W),([int]$env:DRIVER_CROP_H); "
+                      "$b=$i.Clone($r,$i.PixelFormat); $i.Dispose(); "
+                      "$b.Save($env:DRIVER_CROP_OUT,"
+                      "[System.Drawing.Imaging.ImageFormat]::Png); $b.Dispose()")
+            result = run(["powershell", "-NoProfile", "-NonInteractive",
+                          "-Command", script], timeout=45, env={
+                              "DRIVER_CROP_IN": path, "DRIVER_CROP_OUT": output,
+                              "DRIVER_CROP_X": str(x), "DRIVER_CROP_Y": str(y),
+                              "DRIVER_CROP_W": str(width),
+                              "DRIVER_CROP_H": str(height)})
+        elif name == "darwin":
+            result = run(["sips", "--cropToHeightWidth", str(height), str(width),
+                          "--cropOffset", str(y), str(x), path, "--out", output],
+                         timeout=45)
+        elif name == "linux":
+            result = run(["convert", path, "-crop", f"{width}x{height}+{x}+{y}",
+                          "+repage", output], timeout=45)
+        else:
+            return None, f"cropping is not supported on {name}"
+        if not result.ok:
+            return None, f"crop failed: {result.error or result.stderr[:200]}"
+        if png_dimensions(output) != (width, height):
+            return None, "crop dimensions do not match source region"
+        return prepare_image(output)
+
+
+def prepare_image(path, *, max_side=MAX_IMAGE_SIDE, reader=None, scaler=None):
+    """Return (PreparedImage, detail), or a refusal, without changing source.
+
+    Decode/re-encode even in-range files through the platform compositor.
+    The temporary snapshot is removed before returning; callers own only
+    immutable bytes and geometry from the same preparation operation.
+    """
+    try:
+        with tempfile.TemporaryDirectory(prefix="driver-image-") as directory:
+            snapshot = os.path.join(directory, "prepared.png")
+            shutil.copyfile(path, snapshot)
+            with open(snapshot, "rb") as handle:
+                if not decodable_png(handle.read()):
+                    return None, "PNG raster is not decodable"
+            fitted, geometry, detail = _fit_image(
+                snapshot, max_side=max_side, reader=reader, scaler=scaler,
+                decode=True)
+            if fitted is None:
+                return None, detail
+            with open(fitted, "rb") as handle:
+                data = handle.read()
+            if not decodable_png(data):
+                return None, "prepared PNG raster is not decodable"
+            return PreparedImage(data, geometry), detail
+    except OSError as exc:
+        return None, f"image preparation failed: {exc}"
+
+
+def _fit_image(path, *, max_side, reader=None, scaler=None, decode=False):
+    """Compose a private snapshot, or the legacy fit_image in-place target."""
+    reader = reader or png_dimensions
+    scaler = scaler or _scale_image
+    size = reader(path)
+    if size is None:
+        return None, None, f"not a readable PNG: {path}"
+    width, height = size
+    try:
+        target = fit_target(width, height, max_side=max_side)
+        if max_side > MAX_IMAGE_SIDE:
+            raise ValueError(f"max_side must not exceed {MAX_IMAGE_SIDE}")
+    except ValueError as exc:
+        return None, None, f"cannot fit {path}: {exc}"
+    draw_width, draw_height = fit_size(width, height, *target)
+    geometry = ImageGeometry(width, height, *target, draw_width, draw_height)
+    if target == (width, height) and not decode:
+        return path, geometry, f"already within the image bounds: {width}x{height}"
+    scaled, detail = scaler(path, target[0], target[1],
+                            draw_width, draw_height)
+    if scaled is None:
+        return None, None, detail
+    if reader(scaled) != target:
+        return None, None, "prepared PNG dimensions do not match the fit target"
+    return scaled, geometry, (
+        f"fitted {width}x{height} into {target[0]}x{target[1]}"
+        + (f"; {detail}" if detail else ""))
+
+
+def _scale_image(path, width, height, draw_width, draw_height):
+    """Compose one PNG in place, platform-native. ``(path, detail)``/refusal.
+
+    A ``width`` x ``height`` canvas with the content drawn at
+    ``draw_width`` x ``draw_height``, centred. Composition, not policy:
+    both sizes were chosen in Python and the platform step gets no say in
+    them.
+    """
+    name = platform_name()
+    if name == "windows":
+        return _scale_windows(path, width, height, draw_width, draw_height)
+    if name == "darwin":
+        return _scale_darwin(path, width, height, draw_width, draw_height)
+    if name == "linux":
+        return _scale_linux(path, width, height, draw_width, draw_height)
+    return None, f"image scaling is not supported on {name}"
+
+
+def _scale_windows(path, width, height, draw_width, draw_height):
+    # System.Drawing, the same toolset the capture step already uses. The
+    # values travel through the child environment rather than being
+    # formatted into the script, so a path with a space or a quote can
+    # only ever be a value. The script composes only: a black canvas with
+    # the content centred at the draw size Python chose.
+    script = ("$ErrorActionPreference = 'Stop'; "
+              "Add-Type -AssemblyName System.Drawing; "
+              "$i = [System.Drawing.Image]::FromFile($env:DRIVER_SCALE_IN); "
+              "$w = [int]$env:DRIVER_SCALE_W; "
+              "$h = [int]$env:DRIVER_SCALE_H; "
+              "$dw = [int]$env:DRIVER_SCALE_DW; "
+              "$dh = [int]$env:DRIVER_SCALE_DH; "
+              "$b = New-Object System.Drawing.Bitmap $w, $h; "
+              "$g = [System.Drawing.Graphics]::FromImage($b); "
+              "$g.Clear([System.Drawing.Color]::Black); "
+              "$g.DrawImage($i, [int][math]::Floor(($w - $dw) / 2), "
+              "[int][math]::Floor(($h - $dh) / 2), $dw, $dh); "
+              "$g.Dispose(); $i.Dispose(); "
+              "$b.Save($env:DRIVER_SCALE_IN, "
+              "[System.Drawing.Imaging.ImageFormat]::Png); "
+              "$b.Dispose()")
+    result = run(["powershell", "-NoProfile", "-NonInteractive",
+                  "-Command", script], timeout=45,
+                 env={"DRIVER_SCALE_IN": path,
+                      "DRIVER_SCALE_W": str(width),
+                      "DRIVER_SCALE_H": str(height),
+                      "DRIVER_SCALE_DW": str(draw_width),
+                      "DRIVER_SCALE_DH": str(draw_height)})
+    if not result.ok:
+        return None, (f"scaling failed: "
+                      f"{result.error or result.stderr[:200]}")
+    return path, ""
+
+
+def _scale_darwin(path, width, height, draw_width, draw_height):
+    # sips ships with macOS and resizes in place; -z takes height, width.
+    # Two steps because the draw size is Python's and the pad is sips':
+    # the content first at its own ratio, then the canvas around it.
+    result = run(["sips", "-z", str(draw_height), str(draw_width), path],
+                 timeout=45)
+    if not result.ok:
+        return None, (f"scaling failed: "
+                      f"{result.error or result.stderr[:200]}")
+    if (draw_width, draw_height) == (width, height):
+        return path, ""
+    result = run(["sips", "--padToHeightWidth", str(height), str(width),
+                  "--padColor", "000000", path], timeout=45)
+    if not result.ok:
+        return None, (f"scaling failed: "
+                      f"{result.error or result.stderr[:200]}")
+    return path, ""
+
+
+def _scale_linux(path, width, height, draw_width, draw_height):
+    # ImageMagick's convert, the declared Linux scaler. The trailing "!"
+    # pins the exact draw size -- the aspect is already right, fit_size
+    # chose a uniform scale -- and the canvas is a centred black extent.
+    # A missing binary comes back from run() as a named refusal rather
+    # than a crash.
+    result = run(["convert", path,
+                  "-resize", f"{draw_width}x{draw_height}!",
+                  "-background", "black", "-gravity", "center",
+                  "-extent", f"{width}x{height}", path],
+                 timeout=45)
+    if not result.ok:
+        return None, (f"scaling failed: "
+                      f"{result.error or result.stderr[:200]}")
+    return path, ""
 
 
 # ---- synthetic input -----------------------------------------------------

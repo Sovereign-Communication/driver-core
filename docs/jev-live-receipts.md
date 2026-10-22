@@ -201,6 +201,11 @@ closed vocabulary. That is what shipped.
 
 #### CANONICAL CONSTRAINT: Jev is text-only. Images cannot reach it.
 
+> **Superseded 2026-10-14** — see `docs/jev-image-input.md`. Jev 1.14 shipped
+> with a real image surface (`assets` map + `TypeSafe-Danger-Zone-Images`
+> header). Every receipt below stands against **base64-as-text in `state`**,
+> which remains prohibited; "images cannot reach it" no longer holds.
+
 > **Never propose re-encoding a screenshot for Jev.** It was tried against the
 > live endpoint and it cannot work. Any plan that proposes base64, a data URL,
 > or "just send the PNG" must be **redirected, not attempted** — to describing

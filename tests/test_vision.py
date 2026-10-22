@@ -31,6 +31,7 @@ from driver_core.extractors import (
 )
 from driver_core.perception import GUI, Capture
 from driver_core.states import SCREEN_SCHEMA
+from test_image_plumbing import _prepare_fixture, _tiny_png
 
 #: Unique per run, and never a substring of anything in this repository.
 SENTINEL = "SCREENPIXELS-SENTINEL-4f2a9c1e-must-not-escape"
@@ -90,9 +91,11 @@ class FakeService:
         self.requests = []
 
     def call_service(self, url, questions, *, headers=None, timeout=60,
-                     body_extra=None):
+                     body_extra=None, assets=None, images_enabled=False):
         self.requests.append({"url": url, "questions": questions,
-                              "headers": headers, "body": body_extra})
+                              "headers": headers, "body": body_extra,
+                              "assets": assets,
+                              "images_enabled": images_enabled})
         from driver_core.transport import Response
         if not self.payloads:
             return Response(0, "transport_error", detail="fake queue empty")
@@ -359,8 +362,10 @@ class ExtractionPackGuards(unittest.TestCase):
 
         The payload crossing to a remote endpoint must be prose about the
         window. A filesystem path is unreadable there -- a path is only a path
-        on the machine that wrote it -- and base64 is not an image to a
-        text-only model, only a great many tokens.
+        on the machine that wrote it -- and base64 is not prose about the
+        window, only a great many tokens in a payload meant to be read. In
+        the words mode bytes cross in no form; the pixels mode sends them
+        as exactly one asset and never inline (PixelModeTests below).
         """
         body = self._extract()["body"]
         state = body["state"]
@@ -517,6 +522,110 @@ class UnreadCaptureTests(unittest.TestCase):
             sources = configured_sources(settings, reads_captures=reads)
             screen = next(s for s in sources if s.name == "screen")
             self.assertIs(screen.pixels, expected)
+
+
+class PixelModeTests(unittest.TestCase):
+    """The pixels mode: one asset, references on the wire, words as floor.
+
+    The description mode above was built on the rationale that the
+    endpoint is text-only. The endpoint now has an image surface, and the
+    operator's opt-in turns this slot from words to pixels: the capture
+    leaves as exactly one asset, ``state`` and the questions carry its
+    reference and never its bytes, and a capture that cannot be taken
+    falls back to the recorded words rather than failing the slot.
+
+    Hermetic throughout: the capture seam writes a real temp file with
+    known bytes, and no key is billed.
+    """
+
+    def _captor(self, payload):
+        import os
+        import tempfile
+
+        directory = tempfile.mkdtemp(prefix="pixels-")
+        path = os.path.join(directory, "screen.png")
+        with open(path, "wb") as handle:
+            handle.write(payload)
+
+        def capture():
+            return path, ""
+
+        return capture
+
+    @staticmethod
+    def _refusing_captor():
+        def capture():
+            return None, "DRIVER_SCREEN_OUT is not set; cannot capture"
+        return capture
+
+    @staticmethod
+    def _extractor(*, images, captor, service):
+        settings = load_settings(
+            env={"DRIVER_JEV_API_KEY": "sk-test",
+                 "DRIVER_JEV_IMAGES": "true" if images else "0"})
+        audit = MemoryAuditLog()
+        extractor = VisionExtractor(
+            "s", settings, describer=_describe,
+            budget=Budget(1.0, step_ceiling_usd=1.0), audit=audit,
+            transport_module=service, captor=captor, preparer=_prepare_fixture)
+        return extractor, audit
+
+    def test_the_gate_is_off_until_the_operator_opts_in(self):
+        def no_capture():
+            raise AssertionError("the pixels mode must not run unasked")
+
+        service = FakeService(_ok_response())
+        extractor, _ = self._extractor(images=False, captor=no_capture,
+                                       service=service)
+        result = extractor.extract(SCREEN_SCHEMA)
+        self.assertTrue(result.ok, result.reason)
+        (request,) = service.requests
+        self.assertIsNone(request["assets"])
+        self.assertFalse(request["images_enabled"])
+        self.assertIn("description", request["body"]["state"])
+
+    def test_opting_in_sends_the_capture_as_one_asset(self):
+        import base64
+        import json
+
+        payload = _tiny_png(280, 280, note=SENTINEL.encode("ascii"))
+        service = FakeService(_ok_response())
+        extractor, audit = self._extractor(
+            images=True, captor=self._captor(payload), service=service)
+        result = extractor.extract(SCREEN_SCHEMA)
+        self.assertTrue(result.ok, result.reason)
+        (request,) = service.requests
+        self.assertTrue(request["images_enabled"])
+        (ref,) = request["assets"]
+        self.assertEqual(request["assets"][ref]["data_base64"],
+                         base64.b64encode(payload).decode("ascii"))
+        # The bytes live in the assets map and nowhere else: state and the
+        # questions carry the reference, worded for an image.
+        self.assertEqual(request["body"]["state"], {"screen": ref})
+        placement = json.dumps(request["body"]["state"]) + json.dumps(
+            request["questions"])
+        self.assertNotIn("data_base64", placement)
+        self.assertNotIn(base64.b64encode(payload)[:12].decode("ascii"),
+                         placement)
+        self.assertIn("image", json.dumps(request["questions"]))
+        # Nor does the screen itself reach a question or an audit record:
+        # the pixels went in, the metadata came out.
+        self.assertNotIn(SENTINEL, json.dumps(request["questions"]))
+        self.assertNotIn(SENTINEL, json.dumps(audit.read_all()))
+        self.assertNotIn(base64.b64encode(payload)[:12].decode("ascii"),
+                         json.dumps(audit.read_all()))
+
+    def test_a_capture_refusal_falls_back_to_the_recorded_words(self):
+        service = FakeService(_ok_response())
+        extractor, _ = self._extractor(
+            images=True, captor=self._refusing_captor(), service=service)
+        result = extractor.extract(SCREEN_SCHEMA)
+        self.assertTrue(result.ok, result.reason)
+        (request,) = service.requests
+        self.assertIsNone(request["assets"])
+        self.assertFalse(request["images_enabled"])
+        self.assertIn("description", request["body"]["state"])
+        self.assertIn("pixels unavailable", result.reason)
 
 
 if __name__ == "__main__":

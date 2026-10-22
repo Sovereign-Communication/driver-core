@@ -23,9 +23,14 @@ same four settings were read twice to produce two lists that had to be kept
 in agreement by hand, and that a pure declaration had to import the
 perception taxonomy just to order one of them.
 """
+import math
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import MappingProxyType
+
+from .actions import ACTION_CLASSES, IRREVERSIBLE, MUTATING, READ_ONLY
 
 #: The one prefix this package is allowed to read.
 ENV_PREFIX = "DRIVER_"
@@ -44,29 +49,43 @@ DEFAULT_STEP_CEILING_USD = 0.50
 DEFAULT_RUN_CEILING_USD = 5.00
 
 #: Jev is priced on input only; output tokens are free at the account level.
-#: Stated here as a named constant with its provenance rather than inlined at
-#: the call site, so a price correction is a one-line, reviewable change.
-#:
-#: The rate is **$0.042/Mtok** ($42 per billion input tokens), reconciled from
-#: an operator usage export: 13,661,429 input tokens billed at $0.5738, which
-#: implies $0.0420/Mtok exactly. This constant previously read ``0.0042`` --
-#: ten times low -- which had been a temporary correction made while the real
-#: rate was still being established, and it was never walked back. The error is
-#: silent by construction: it under-reserves, so no budget refusal ever fires
-#: early, and it under-reports, so every settled figure in the audit chain and
-#: in ``GET /verify`` reads a tenth of what was actually spent.
-#:
-#: The blast radius is the ceilings themselves. ``DEFAULT_STEP_CEILING_USD``
-#: and ``DEFAULT_RUN_CEILING_USD`` are compared against reservations priced
-#: here, so at a tenth of the true rate they admit ten times the intended
-#: spend before refusing. "Refuse before dispatch" was true throughout; it was
-#: simply guarding a smaller purse than the operator believes.
+#: The rate is **$0.042/Mtok**, reconciled from an operator usage export --
+#: the derivation, and the earlier rate error this corrected, are the canon
+#: addendum's. Named rather than inlined so a price correction is a one-line
+#: change; note the ceilings below are compared against reservations priced
+#: here, so a rate error scales what they admit.
 JEV_INPUT_PRICE_PER_MILLION = 0.042
 
 #: Confidence above which a decision is acted on. Jev's calibrated
 #: confidence is the signal; this is the threshold; code owns both the
 #: comparison and the vocabulary it is comparing within.
 DEFAULT_CONFIDENCE_THRESHOLD = 0.70
+
+#: The confidence band Jev's answers jittered across in the operator-verified
+#: probe of the canon addendum (§5b owns the measurement). A threshold within
+#: one width of the band is decided by sampling noise rather than by the
+#: state -- the same screen can pass and fail on two runs.
+CONFIDENCE_JITTER_BAND = (0.63, 0.67)
+
+#: What a threshold must clear the jitter band by -- §5b's measured failure
+#: was a clearance smaller than this. :func:`validated_ladder` enforces it
+#: on every rung, so the failure is refused at construction.
+JITTER_BAND_WIDTH = 0.04
+
+#: Slack for the ladder comparisons. Rungs are declared in hundredths and
+#: binary floats do not land exactly on them (0.71 - 0.67 is
+#: 0.0399999...), so a rung written exactly one band width out is judged at
+#: its written value rather than at its binary approximation. Wide enough
+#: to absorb that noise, far narrower than any gap a real ladder declares.
+_JITTER_EPSILON = 1e-9
+
+#: The model the image path is pinned to. Box questions exist only on Jev
+#: 1.14, and ``jev-latest`` still points at 1.13 -- so a request carrying
+#: images or box questions through the moving alias is sent to whatever
+#: the alias names today, and the alias will move again. A pin, not an
+#: alias: :func:`image_model` replaces the default alias on the image path
+#: and obeys any model an operator names explicitly.
+JEV_IMAGE_MODEL = "jev-1.14.0"
 
 #: Extraction consensus policy. See driver_core.consensus for why a quorum
 #: below the full slot count is a real choice rather than a shortcut.
@@ -101,6 +120,142 @@ def validated_token(value, source):
             f"{source} is shorter than the {MIN_TOKEN_LENGTH}-character "
             f"minimum for a bearer token")
     return value
+
+
+@dataclass(frozen=True)
+class ConfidenceRung:
+    """One rung of the per-action confidence ladder.
+
+    ``act`` is the confidence at which an action of this consequence class
+    acts; ``confirm`` is where it stops for a human confirmation instead
+    ("an irreversible action needs 0.85 or a confirmation step"). A rung
+    with ``confirm == act`` has no confirmation band at all, which is the
+    declaration for a class whose actions need no human in the loop.
+    """
+
+    act: float
+    confirm: float
+
+    def __post_init__(self):
+        """Every malformed declaration fails here, naming the field.
+
+        None, strings, bools (an int in Python's clothing) and non-finite
+        floats are not thresholds -- they are mistakes, and a mistake that
+        reaches a comparison raises ``TypeError`` far from its cause or,
+        worse, compares as a number it was never meant to be. Refused at
+        construction with :class:`ConfigError`, so the operator-facing
+        surface reports configuration, never a crash.
+        """
+        for label, value in (("act", self.act), ("confirm", self.confirm)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ConfigError(
+                    f"confidence ladder rung {label} must be a finite "
+                    f"number in [0, 1], got {value!r} "
+                    f"({type(value).__name__})")
+            if not math.isfinite(value):
+                raise ConfigError(
+                    f"confidence ladder rung {label} must be a finite "
+                    f"number in [0, 1], got {value}")
+            if not 0 <= value <= 1:
+                raise ConfigError(
+                    f"confidence ladder rung {label} {value} is outside "
+                    f"[0, 1]")
+
+
+#: The declared confidence ladder, per action by consequence. The global
+#: floor (``confidence_threshold``) still applies to everything: a rung can
+#: only raise the bar for its class, never lower it -- an action clears
+#: ``max(floor, rung.act)`` to act, ``max(floor, rung.confirm)`` to reach
+#: the confirmation route, and is blocked below that.
+#:
+#: Every value clears the observed jitter band
+#: (:data:`CONFIDENCE_JITTER_BAND`) by more than its width
+#: (:data:`JITTER_BAND_WIDTH`), so none is §5b's failure mode.
+CONFIDENCE_LADDER = MappingProxyType({
+    # Observes, changes nothing, safe to repeat: no confirmation band, the
+    # rung is its own confirm floor.
+    READ_ONLY: ConfidenceRung(act=0.55, confirm=0.55),
+    # Changes observable state but is recoverable: acts at 0.75, and the
+    # band below it stops for a confirmation.
+    MUTATING: ConfidenceRung(act=0.75, confirm=0.55),
+    # Cannot be undone by this system: acts at 0.85, or stops for a fresh
+    # human confirmation in the band below.
+    IRREVERSIBLE: ConfidenceRung(act=0.85, confirm=0.75),
+})
+
+
+def _clears_jitter_band(value):
+    """``True`` when a threshold sits at least one band width from the band."""
+    low, high = CONFIDENCE_JITTER_BAND
+    if value < low:
+        clearance = low - value
+    elif value > high:
+        clearance = value - high
+    else:
+        clearance = -1.0
+    return clearance + _JITTER_EPSILON >= JITTER_BAND_WIDTH
+
+
+def validated_ladder(ladder):
+    """Return ``ladder`` if every rung is safe to enforce, else refuse.
+
+    The rules are §5b's, enforced rather than merely documented. Every
+    threshold -- act and confirm alike -- must clear the observed jitter
+    band by at least its width; two act rungs must be more than one width
+    apart (a smaller gap is two rungs that look separated on paper and are
+    not); and a confirmation band must be either absent or wider than the
+    width too. Code owns the thresholds, so code owns this check.
+    """
+    if not isinstance(ladder, Mapping) or not ladder:
+        raise ConfigError("a confidence ladder must be a non-empty mapping")
+    unknown = sorted(set(ladder) - set(ACTION_CLASSES))
+    if unknown:
+        raise ConfigError(
+            f"confidence ladder declares thresholds for unknown consequence "
+            f"class(es) {unknown}; declare one of {list(ACTION_CLASSES)}")
+    for name, rung in ladder.items():
+        if not isinstance(rung, ConfidenceRung):
+            raise ConfigError(
+                f"confidence ladder rung {name!r} must be a ConfidenceRung")
+        # Well-formed values are the rung's own guarantee
+        # (:meth:`ConfidenceRung.__post_init__`); what is checked here is
+        # where they sit -- which is the ladder's business, not a single
+        # rung's.
+        for label, value in (("act", rung.act), ("confirm", rung.confirm)):
+            if not _clears_jitter_band(value):
+                raise ConfigError(
+                    f"confidence ladder rung {name!r} {label} {value} does "
+                    f"not clear the observed jitter band "
+                    f"{CONFIDENCE_JITTER_BAND} by its width "
+                    f"{JITTER_BAND_WIDTH}; a threshold that close is decided "
+                    f"by sampling noise rather than by the state")
+        if (rung.act != rung.confirm
+                and rung.act - rung.confirm <= JITTER_BAND_WIDTH + _JITTER_EPSILON):
+            raise ConfigError(
+                f"confidence ladder rung {name!r} has a confirmation band "
+                f"[{rung.confirm}, {rung.act}) no wider than the jitter band "
+                f"width {JITTER_BAND_WIDTH}")
+    acts = sorted(rung.act for rung in ladder.values())
+    for lower, upper in zip(acts, acts[1:], strict=False):
+        if upper - lower <= JITTER_BAND_WIDTH + _JITTER_EPSILON:
+            raise ConfigError(
+                f"confidence ladder act rungs {lower} and {upper} are not "
+                f"more than one jitter band width apart; they would be "
+                f"separated on paper, not by the model")
+    return ladder
+
+
+def image_model(settings):
+    """The model an image-path request is sent to: a pin, never the alias.
+
+    An operator who names a version (or the docs' blessed ``jev-preview``)
+    has pinned their own choice and is obeyed; only the default alias is
+    replaced, because the alias is the thing that moves under you.
+    """
+    configured = (settings.jev_model or "").strip()
+    if configured and configured != "jev-latest":
+        return configured
+    return JEV_IMAGE_MODEL
 
 
 def _env_bool(env, name, default):
@@ -157,6 +312,32 @@ class Settings:
     #: token it can present -- hence the setting.
     token: str = field(default="", repr=False)
     jev_model: str = "jev-latest"
+    #: The image surface is opt-in at the far end too: the endpoint rejects
+    #: an image request without its danger-zone header, and this flag is the
+    #: operator's admission of that header. Off by default; honored only
+    #: when a request actually carries assets.
+    jev_images: bool = False
+    #: Frame history is opt-in beside the image surface: consecutive
+    #: prepared frames retained only in the slot's bounded session history
+    #: feed a semantic stability question in the extraction pack. Off by default.
+    jev_frames: bool = False
+    #: Box questions are the second opt-in beside the image surface: image
+    #: traffic on the pinned model, refused by name without it. Off by
+    #: default.
+    jev_box: bool = False
+    #: The per-action confidence ladder is the third opt-in: the rungs are
+    #: always declared, but ``policy.check_decision`` enforces them only
+    #: with this flag set, so an ordinary run keeps the single global
+    #: threshold. Off by default.
+    jev_ladder: bool = False
+    #: The guardrail pack is the second half of the same landing: one
+    #: billed request per acting step, thresholded in code at the execution
+    #: gate. Off by default; without the flag the pack is never asked or
+    #: charged.
+    jev_guardrails: bool = False
+    #: The ladder, keyed by consequence class. Validated on construction:
+    #: every rung must clear the observed jitter band by its width.
+    confidence_ladder: Mapping = CONFIDENCE_LADDER
     extractor_pool: tuple = ()
     step_ceiling_usd: float = DEFAULT_STEP_CEILING_USD
     run_ceiling_usd: float = DEFAULT_RUN_CEILING_USD
@@ -199,6 +380,7 @@ class Settings:
                 f"${self.step_ceiling_usd}, so no step could ever run")
         if self.token:
             validated_token(self.token, "the declared token")
+        validated_ladder(self.confidence_ladder)
 
     @property
     def keyed(self):
@@ -258,6 +440,11 @@ def load_settings(env=None, **overrides):
         jev_api_key=env.get(ENV_PREFIX + "JEV_API_KEY", ""),
         token=token,
         jev_model=env.get(ENV_PREFIX + "JEV_MODEL", "jev-latest"),
+        jev_images=_env_bool(env, "JEV_IMAGES", False),
+        jev_frames=_env_bool(env, "JEV_FRAMES", False),
+        jev_box=_env_bool(env, "JEV_BOX", False),
+        jev_ladder=_env_bool(env, "JEV_LADDER", False),
+        jev_guardrails=_env_bool(env, "JEV_GUARDRAILS", False),
         extractor_pool=pool,
         step_ceiling_usd=_env_float(env, "STEP_CEILING_USD",
                                     DEFAULT_STEP_CEILING_USD),

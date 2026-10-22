@@ -220,7 +220,7 @@ class LiveProtocolTests(unittest.TestCase):
 @unittest.skipUnless(_KEYED, _SKIP)
 @unittest.skipUnless(_SCREEN, _SKIP_SCREEN)
 class LiveVisionTests(unittest.TestCase):
-    """The one step the text-only constraint exists to protect.
+    """The one step the words-only path exists to protect.
 
     Pre-repair this exact step produced two extractor slots with
     ``ok: False`` ("model returned no parseable state") and a tally of

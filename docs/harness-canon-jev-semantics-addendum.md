@@ -177,7 +177,16 @@ the bounded judgments costing anything.
 vision tier cannot work as shipped"* and promised work that has since been done.
 It is now a record of the repair.
 
+**Superseded 2026-10-14.** The constraint below is amended, not erased — see
+`docs/jev-image-input.md`. Jev 1.14 shipped today with a real image surface:
+images travel in an `assets` map behind the `TypeSafe-Danger-Zone-Images`
+header and arrive as pixels. The receipts below remain true and remain
+binding **against the shape they tested** — base64-as-text in `state` is still
+prohibited — but "images cannot reach it" is no longer true. The redirect
+becomes a gate: pixels are opt-in, pinned, recorded, and still the last tier.
+
 > ### CANONICAL CONSTRAINT — Jev is text-only. Images cannot reach it.
+> **(as of 2026-10-05; superseded 2026-10-14 — see above)**
 >
 > **Redirect, do not attempt.** Any future plan proposing base64, a data URL,
 > or "just send the screenshot" is wrong and has been disproved against the live

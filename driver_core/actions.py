@@ -220,10 +220,6 @@ class Vocabulary:
     def names(self):
         return tuple(sorted(self._by_name))
 
-    def of_class(self, action_class):
-        return tuple(a for a in self._actions
-                     if a.action_class == action_class)
-
     def to_dict(self):
         return {
             "id": self.id,
