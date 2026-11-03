@@ -324,10 +324,14 @@ class AuditIsRequiredTests(unittest.TestCase):
         """Every class in the package whose constructor accepts ``audit``."""
         found = []
         root = pathlib.Path(driver_core.__file__).parent
-        for path in sorted(root.glob("*.py")):
-            module = importlib.import_module(
-                f"driver_core.{path.stem}" if path.stem != "__init__"
-                else "driver_core")
+        # Recursive on purpose: a class that moves into a subpackage (the
+        # extraction tier split into one module per concern) must stay in
+        # this scan's view, or the rule silently stops covering it.
+        for path in sorted(root.glob("**/*.py")):
+            parts = list(path.with_suffix("").relative_to(root).parts)
+            if parts[-1] == "__init__":
+                parts = parts[:-1]
+            module = importlib.import_module(".".join(["driver_core"] + parts))
             for _, cls in inspect.getmembers(module, inspect.isclass):
                 if cls.__module__ != module.__name__:
                     continue

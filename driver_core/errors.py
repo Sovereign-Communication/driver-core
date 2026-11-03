@@ -25,24 +25,6 @@ class VocabularyError(DriverError):
     """
 
 
-class AgreementError(DriverError):
-    """The extractors did not reach a usable verdict.
-
-    Carries the reason (``insufficient`` or ``disagreed``) so a caller can
-    distinguish "nobody answered" from "they answered differently" -- two
-    failures with completely different remedies.
-    """
-
-    def __init__(self, reason, detail=""):
-        super().__init__(f"{reason}: {detail}" if detail else reason)
-        self.reason = reason
-        self.detail = detail
-
-
-class DecisionError(DriverError):
-    """The decision tier could not produce a usable recommendation."""
-
-
 class ConsentError(DriverError):
     """An action was attempted without valid, current, sufficient consent."""
 
