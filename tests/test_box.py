@@ -32,7 +32,7 @@ from driver_core.config import (
 )
 from driver_core.driver import SCREEN_SCHEMA
 from driver_core.extractors import VisionExtractor
-from test_image_plumbing import _prepare_fixture, _tiny_png
+from tests.test_image_plumbing import _prepare_fixture, _tiny_png
 from driver_core.locate import (
     BOX_REPAIR_STEP, edge_questions, locate, locate_questions, parse_box,
 )

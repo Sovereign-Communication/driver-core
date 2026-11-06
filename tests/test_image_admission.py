@@ -15,7 +15,7 @@ from driver_core.errors import BudgetRefused
 from driver_core.extractors import VisionExtractor
 from driver_core.extractors.sizing import IMAGE_REQUEST_TOKEN_BOUND
 from driver_core.states import SCREEN_SCHEMA
-from test_image_plumbing import _prepare_fixture
+from tests.test_image_plumbing import _prepare_fixture
 
 
 def compressed_png():
