@@ -31,7 +31,7 @@ from driver_core.extractors import (
 )
 from driver_core.perception import GUI, Capture
 from driver_core.states import SCREEN_SCHEMA
-from test_image_plumbing import _prepare_fixture, _tiny_png
+from tests.test_image_plumbing import _prepare_fixture, _tiny_png
 
 #: Unique per run, and never a substring of anything in this repository.
 SENTINEL = "SCREENPIXELS-SENTINEL-4f2a9c1e-must-not-escape"

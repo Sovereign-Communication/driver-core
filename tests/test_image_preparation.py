@@ -12,7 +12,7 @@ from driver_core.budget import Budget
 from driver_core.config import load_settings
 from driver_core.extractors import VisionExtractor
 from driver_core.states import SCREEN_SCHEMA
-from test_image_plumbing import _tiny_png
+from tests.test_image_plumbing import _tiny_png
 
 
 class ImagePreparationTests(unittest.TestCase):

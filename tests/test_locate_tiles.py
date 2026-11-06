@@ -11,7 +11,7 @@ from driver_core.config import JEV_INPUT_PRICE_PER_MILLION, load_settings
 from driver_core.extractors import VisionExtractor
 from driver_core.extractors.sizing import IMAGE_REQUEST_TOKEN_BOUND
 from driver_core.extractors.tiles import regions
-from test_image_plumbing import _tiny_png
+from tests.test_image_plumbing import _tiny_png
 
 
 class TileLocateTests(unittest.TestCase):

@@ -14,7 +14,7 @@ from driver_core.consensus import (
 )
 from driver_core.extractors import VisionExtractor
 from driver_core.extractors.sizing import IMAGE_REQUEST_TOKEN_BOUND
-from test_image_plumbing import _tiny_png
+from tests.test_image_plumbing import _tiny_png
 
 
 def box(left=.25, right=.75):

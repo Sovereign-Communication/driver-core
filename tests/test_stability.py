@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 from unittest.mock import patch
-from test_image_plumbing import _prepare_fixture
+from tests.test_image_plumbing import _prepare_fixture
 
 from driver_core import policy
 from driver_core.actions import DEFAULT_VOCABULARY
@@ -86,7 +86,7 @@ def _pixels_extractor(payloads, *, images=True, frames=True, window=3):
         data = payloads[index] if index < len(payloads) else payloads[-1]
         path = os.path.join(directory, f"frame-{index}.png")
         with open(path, "wb") as handle:
-            from test_image_plumbing import _tiny_png
+            from tests.test_image_plumbing import _tiny_png
             handle.write(_tiny_png(280, 280, note=data))
         return path, ""
 
