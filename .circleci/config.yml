@@ -1,0 +1,154 @@
+# CircleCI pilot for driver-core (#16, TRACK B) - 1:1 translation of
+# .github/workflows/ci.yml.
+#
+# STATUS: authored, NOT validated by CircleCI's parser and NOT yet run. This
+# machine has no CircleCI CLI and no CircleCI token, so `circleci config
+# validate` / a first pipeline could not be executed here; the file is
+# YAML-parse-checked only. Treat the first pipeline as the acceptance test.
+#
+# WHAT MAPS 1:1 (names and commands verbatim from ci.yml):
+#   Install  python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+#   Compile  python -m compileall -q driver_core
+#   Lint     ruff check driver_core tests
+#   Test     python -W error::ResourceWarning -m unittest discover -s tests -t . -v
+#   wheel    build + "wheel smoke (installed, not the source tree)" with the same
+#            DRIVER_AUDIT_PATH / driver-core health / driver-core verify steps
+#
+# EXECUTOR CHOICES AND DEVIATIONS (recorded, per the work order):
+#   - Linux legs use the CircleCI first-party Docker image cimg/python:<ver>,
+#     one leg per matrix python version (3.9, 3.12, 3.13). The Actions
+#     ubuntu-latest leg becomes three CircleCI legs; same steps.
+#   - macOS uses the CircleCI macOS executor. Actions pinned the python
+#     version per leg with actions/setup-python; CircleCI macOS images ship a
+#     fixed toolchain per image, so this port runs ONE macOS leg on the
+#     image's python and records the version at run time. Pinning 3.9/3.12/
+#     3.13 on macOS needs a pyenv/brew install step whose versions depend on
+#     the image and would cost credit without adding signal for a stdlib-only
+#     package. Deviation is deliberate and named here.
+#   - Windows uses the CircleCI Windows machine executor and installs python
+#     with chocolatey (the image does not guarantee a python). ONE Windows
+#     leg, same reasoning as macOS.
+#   - Net matrix: 3 Linux + 1 macOS + 1 Windows + wheel = 6 jobs, against the
+#     Actions workflow's 9 test legs + wheel. The python-version axis is fully
+#     covered on Linux; OS coverage is one leg per non-Linux OS.
+#
+# CREDIT BURN: not measured. It requires a first run, and no pipeline could be
+# triggered from the authoring machine. The free plan allowance is 30,000
+# credits/month; the report for #16 must replace this paragraph with the
+# measured figure from the first full run.
+
+version: 2.1
+
+executors:
+  linux:
+    parameters:
+      py:
+        type: string
+        default: "3.12"
+    docker:
+      - image: cimg/python:<< parameters.py >>
+  macos:
+    macos:
+      xcode: 16.0.0
+  windows:
+    machine:
+      image: windows-server-2022-gui:current
+    resource_class: windows.medium
+    shell: powershell.exe
+
+jobs:
+  test_linux:
+    parameters:
+      py:
+        type: string
+    executor:
+      name: linux
+      py: << parameters.py >>
+    steps:
+      - checkout
+      - run:
+          name: Install
+          command: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - run:
+          name: Compile
+          command: python -m compileall -q driver_core
+      - run:
+          name: Lint
+          command: ruff check driver_core tests
+      - run:
+          name: Test
+          command: python -W error::ResourceWarning -m unittest discover -s tests -t . -v
+
+  test_macos:
+    executor: macos
+    steps:
+      - checkout
+      - run:
+          name: Record interpreter
+          command: python3 -V && python3 -c "import sys; print(sys.executable)"
+      - run:
+          name: Install
+          command: python3 -m pip install --upgrade pip && python3 -m pip install -e ".[dev]"
+      - run:
+          name: Compile
+          command: python3 -m compileall -q driver_core
+      - run:
+          name: Lint
+          command: python3 -m ruff check driver_core tests
+      - run:
+          name: Test
+          command: python3 -W error::ResourceWarning -m unittest discover -s tests -t . -v
+
+  test_windows:
+    executor: windows
+    steps:
+      - checkout
+      - run:
+          name: Install python
+          command: choco install python312 --no-progress -y
+      - run:
+          name: Record interpreter
+          command: python -V
+      - run:
+          name: Install
+          command: python -m pip install --upgrade pip; python -m pip install -e ".[dev]"
+      - run:
+          name: Compile
+          command: python -m compileall -q driver_core
+      - run:
+          name: Lint
+          command: ruff check driver_core tests
+      - run:
+          name: Test
+          command: python -W error::ResourceWarning -m unittest discover -s tests -t . -v
+
+  wheel:
+    executor:
+      name: linux
+      py: "3.12"
+    steps:
+      - checkout
+      - run:
+          name: Build
+          command: |
+            python -m pip install --upgrade pip build
+            python -m build
+      - run:
+          name: Wheel smoke (installed, not the source tree)
+          command: |
+            python -m venv /tmp/smoke
+            /tmp/smoke/bin/pip install dist/*.whl
+            cd /tmp
+            DRIVER_AUDIT_PATH=/tmp/smoke-audit.jsonl /tmp/smoke/bin/driver-core health
+            /tmp/smoke/bin/driver-core verify
+
+workflows:
+  ci:
+    jobs:
+      - test_linux:
+          matrix:
+            parameters:
+              py: ["3.9", "3.12", "3.13"]
+      - test_macos
+      - test_windows
+      - wheel
